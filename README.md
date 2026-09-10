@@ -5,7 +5,56 @@ training pipelines, gameplay analytics, and dashboards.
 
 See [CLAUDE.md](CLAUDE.md) for coding standards and project layout.
 
+## Getting started
+
+```bash
+uv sync                 # install deps and the catan_bots package itself
+uv run pytest           # run the test suite
+uv run ruff format .    # format
+uv run ruff check .     # lint
+```
+
+Production code lives in [src/catan_bots/](src/catan_bots/);
+[notebooks/playground.ipynb](notebooks/playground.ipynb) is research only and
+imports those modules.
+
 ## Project log
+
+### 2026-09-10 — Production code extracted into modules
+
+**Status:** The package is importable and tested; the notebook is research-only.
+
+**What changed:**
+
+- `src/catan_bots/` is now a real installed package (`uv sync` installs it), so
+  `from catan_bots import ...` works from notebooks, scripts and tests.
+- Everything that used to be defined inside the notebook now lives in modules:
+  - [src/catan_bots/games.py](src/catan_bots/games.py) — `GameFactory`, which
+    resets players between games and makes any integer seed reproducible
+    (plain `catanatron.Game` silently treats `seed=0` as "no seed").
+  - [src/catan_bots/bots/greedy_settler.py](src/catan_bots/bots/greedy_settler.py)
+    — `GreedySettlerBot`, with a private seeded RNG for reproducible tie-breaks.
+  - [src/catan_bots/analytics/](src/catan_bots/analytics/) — `GameReport` and
+    `PlayerSnapshot`, `BoardInspector`, `Tournament`/`TournamentResult`, and the
+    `ActionTypeCounter` accumulator.
+- [notebooks/playground.ipynb](notebooks/playground.ipynb) (moved out of `src/`)
+  now imports those modules and only demonstrates and explores them.
+- 28 tests in [tests/](tests/) cover the new modules; the empty `catan.py` stub
+  is gone.
+
+**What's missing:**
+
+- `src/catan_bots/envs/` — Gymnasium env does not exist yet.
+- No training pipeline, no baselines beyond catanatron's built-ins.
+- `main.py` is still a stub.
+
+**Next steps:**
+
+1. Decide 2-player vs. 4-player scope for v1 env.
+2. Run the `scaffold-gym-env` skill to generate the `CatanEnv` skeleton, reusing
+   `GameFactory` for construction and `GameReport` for episode diagnostics.
+3. Run the `train-rl-agent` skill for a first MaskablePPO smoke run, and
+   evaluate it with `Tournament` against the built-in bots.
 
 ### 2026-06-16 — Scaffolding complete, implementation not started
 

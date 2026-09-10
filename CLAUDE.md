@@ -74,6 +74,18 @@ def compute_longest_road(board: Board, player: Player) -> int:
 - **Tests** live in `tests/` and run with `uv run pytest`.
 - **Imports** at module top, ordered stdlib → third-party → local.
 
+### 6. Notebooks are for research only
+
+- All production code lives in `src/catan_bots/` as importable modules with
+  docstrings, type hints, and tests. Notebooks import it and call it.
+- Never define a bot, environment, metric, or any other reusable logic in a
+  notebook and leave it there. Prototype freely, then promote the code into a
+  module and cover it with a test in `tests/`.
+- A notebook cell should read as a few calls into the package plus the printing
+  or plotting of results.
+- The package is installed into the environment by `uv sync`, so
+  `from catan_bots import ...` works from any notebook.
+
 ## Project Layout
 
 ```text
@@ -81,7 +93,11 @@ catan-bots/
 ├── CLAUDE.md            # this file — coding standards
 ├── pyproject.toml       # project + dependencies (managed by uv)
 ├── main.py              # entry point
-├── src/                 # package code (envs, agents, analytics, dashboards)
+├── src/catan_bots/      # package code
+│   ├── games.py         # game construction and seeding
+│   ├── bots/            # playable bots
+│   └── analytics/       # reports, board stats, tournaments
+├── notebooks/           # research notebooks (no production code)
 ├── tests/               # pytest suites
 └── .claude/
     ├── agents/          # specialized subagents
