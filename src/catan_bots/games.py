@@ -7,6 +7,9 @@ from catanatron import Game
 from catanatron.models.map import CatanMap
 from catanatron.models.player import Player
 
+from catan_bots.rules.discard import DiscardPolicy, DiscardPolicyRegistry
+from catan_bots.runner import GameRunner
+
 
 class GameFactory:
     """Create fresh, reproducible games for one roster of players.
@@ -20,6 +23,8 @@ class GameFactory:
         players: The roster handed to every game this factory creates.
         vps_to_win: Victory points required to win a created game.
         catan_map: Optional fixed map; `None` builds the standard base map.
+        discard_policy: Policy resolving discard-on-seven, or `None` to keep
+            catanatron's built-in uniformly random discard.
     """
 
     def __init__(
@@ -27,6 +32,7 @@ class GameFactory:
         players: Sequence[Player],
         vps_to_win: int = 10,
         catan_map: CatanMap | None = None,
+        discard_policy: DiscardPolicy | DiscardPolicyRegistry | None = None,
     ) -> None:
         """Store the roster and rules used for every created game.
 
@@ -35,6 +41,10 @@ class GameFactory:
                 randomised by `Game` itself.
             vps_to_win: Victory points required to win. Defaults to 10.
             catan_map: Map to play on. Defaults to the standard base map.
+            discard_policy: Policy (or per-seat registry) deciding which cards
+                a player discards on a seven. Defaults to `None`, which leaves
+                catanatron's uniformly random discard in place so parity with
+                the stock engine stays the baseline.
 
         Raises:
             ValueError: If the roster is empty or holds more than four players.
@@ -44,6 +54,7 @@ class GameFactory:
         self.players: tuple[Player, ...] = tuple(players)
         self.vps_to_win = vps_to_win
         self.catan_map = catan_map
+        self.discard_policy = discard_policy
 
     def create(self, seed: int | None = None) -> Game:
         """Build one un-played game with freshly reset players.
@@ -69,6 +80,9 @@ class GameFactory:
     ) -> Game:
         """Build a game and run it to completion.
 
+        Runs through a `GameRunner` when a discard policy is configured, and
+        through catanatron's own loop otherwise.
+
         Args:
             seed: Random seed for the game. Defaults to a random seed.
             accumulators: `GameAccumulator` hooks to attach to the run.
@@ -78,8 +92,11 @@ class GameFactory:
             catanatron's turn limit without a winner.
         """
         game = self.create(seed)
-        game.play(accumulators=list(accumulators or []))
-        return game
+        hooks = list(accumulators or [])
+        if self.discard_policy is None:
+            game.play(accumulators=hooks)
+            return game
+        return GameRunner(self.discard_policy).play(game, hooks)
 
     @staticmethod
     def _seed_global_rng(seed: int | None) -> None:

@@ -17,11 +17,23 @@ from catan_bots.analytics import (
 )
 from catan_bots.bots import GreedySettlerBot
 from catan_bots.games import GameFactory
+from catan_bots.rules import (
+    BuildPlanDiscard,
+    DiscardPolicy,
+    DiscardPolicyRegistry,
+    UniformRandomDiscard,
+    enumerate_discards,
+)
+from catan_bots.runner import GameRunner
 
 __all__ = [
     "ActionTypeCounter",
     "BoardInspector",
+    "BuildPlanDiscard",
+    "DiscardPolicy",
+    "DiscardPolicyRegistry",
     "GameFactory",
+    "GameRunner",
     "GameReport",
     "GreedySettlerBot",
     "NodeProduction",
@@ -29,4 +41,6 @@ __all__ = [
     "TileSummary",
     "Tournament",
     "TournamentResult",
+    "UniformRandomDiscard",
+    "enumerate_discards",
 ]

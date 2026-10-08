@@ -20,6 +20,49 @@ imports those modules.
 
 ## Project log
 
+### 2026-10-08 — Discard-on-seven is now a modelled decision
+
+**Status:** Discard rules implemented and measured. Masked observations,
+PettingZoo AEC and trading are still unimplemented (analysis only).
+
+**Why:** catanatron does not model this decision. `discard_possibilities`
+returns one placeholder action and the engine throws away a uniformly random
+half of the hand, with a TODO explaining that enumerating the choice would
+explode the decision tree. That explosion only happens if same-resource cards
+are treated as distinguishable. Measured over 729 real discard events,
+enumerating resource *multisets* gives a median of 11 options and never more
+than 100, against a mean of 1,773 per-card combinations.
+
+**What changed:**
+
+- [src/catan_bots/rules/discard.py](src/catan_bots/rules/discard.py) —
+  `enumerate_discards` (the full multiset choice, for exposing discard to a
+  learning agent), a `DiscardPolicy` ABC whose `resolve` validates selections
+  before the engine sees them, `UniformRandomDiscard` (seeded engine-parity
+  baseline) and `BuildPlanDiscard` (the better rule).
+- [src/catan_bots/runner.py](src/catan_bots/runner.py) — `GameRunner` owns the
+  play loop and resolves discard prompts through a policy, since a discard
+  choice cannot travel through `Player.decide`.
+- `GameFactory` takes an optional `discard_policy`; with none, catanatron's
+  random discard stays in place so engine parity remains the baseline.
+
+**Measured effect** (same bot in all seats, only the discard rule differing):
+
+- Win rate over 3000 seat-balanced games: **52.6%**, 95% CI [50.8%, 54.4%].
+- Paired on 1413 identical positions, the kept hand can afford a build
+  **33.5%** of the time vs **25.7%** for random (McNemar z = 6.0).
+
+**Engine caveat found:** catanatron picks discarders against
+`state.discard_limit` but chains to the next discarder against a hardcoded
+`> 7`, so any non-default `discard_limit` makes it skip discarders.
+
+**Next steps:**
+
+1. Redacted per-seat observations (the hidden-information leak).
+2. A PettingZoo AEC wrapper driven by `state.current_color()`.
+3. A minimal domestic-trade protocol.
+
+
 ### 2026-09-10 — Production code extracted into modules
 
 **Status:** The package is importable and tested; the notebook is research-only.
