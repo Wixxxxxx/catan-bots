@@ -20,6 +20,36 @@ imports those modules.
 
 ## Project log
 
+### 2026-10-08 — Player-to-player trading
+
+**Status:** Step 5 done, ahead of baselines and training as agreed, so no
+model is trained on a game without trading. Next: strong baselines (step 3).
+
+**Rules** ([src/catan_bots/rules/trading.py](src/catan_bots/rules/trading.py)):
+
+- Only the active player, after rolling, proposes. Every other seat answers
+  in play order, then the proposer trades with one acceptor or cancels.
+- No gifts and no like-for-like trades. Offers and answers are public.
+- Agreed limits: up to two cards per side (230 offers), three offers per
+  turn. Counter-offers are a planned second phase.
+
+**Environment:** 587 actions (236 trade slots) and 1,413 features (a 28-feature
+trade block). On by default; `trading=None` switches it off without changing
+the spaces.
+
+**Bots:** a `TradingPlayer` interface and `GreedyTraderBot`, which trades
+towards its nearest build, refuses seats close to winning, and settles with
+the trailing acceptor. Bots without the interface decline every offer.
+
+**Measured effect** (2,000 seat-balanced games: two `GreedyTraderBot`s against
+two `GreedySettlerBot`s, identical build logic, only trading differing):
+traders won **62.0%** of games, 95% CI [59.9%, 64.1%], against 50% expected.
+That came from only 5.8 completed trades per game (121.8 offers). Because
+non-traders refuse everything, the two traders effectively formed a trading
+partnership against the other two — the coalition dynamic that makes
+4-player trading strategically interesting.
+
+
 ### 2026-10-08 — Multi-agent environment
 
 **Status:** Step 2 done. The environment supports 2, 3 and 4 players behind
