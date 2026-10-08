@@ -6,14 +6,21 @@ from catanatron import Action, Color, Game, GameAccumulator
 from catanatron.game import TURNS_LIMIT
 from catanatron.models.enums import ActionPrompt, ActionType
 
+from catan_bots.bots.trading import TradingPlayer
 from catan_bots.rules.dev_cards import DevCardTimingRule
 from catan_bots.rules.discard import DiscardPolicy, DiscardPolicyRegistry
+from catan_bots.rules.trading import (
+    DEFAULT_TRADING_RULES,
+    TradeOffer,
+    TradeProtocol,
+    TradingRules,
+)
 
 
 class GameRunner:
     """Own the play loop so rules catanatron skips can be enforced.
 
-    Two rules are layered on top of the engine:
+    Three rules are layered on top of the engine:
 
     - **Discard on a seven.** Catanatron offers only
       `Action(color, DISCARD, None)` and discards a random half, so a discard
@@ -24,6 +31,10 @@ class GameRunner:
     - **Development-card timing.** Before every decision the playable actions
       are filtered so a card cannot be played the turn it was bought. Bots and
       the engine's own validation both read the filtered list.
+    - **Domestic trading.** Before each decision of an active `TradingPlayer`
+      after its roll, the bot may make offers; other `TradingPlayer` seats
+      answer, and every other seat declines. A bot is never handed an offer
+      it already made this turn, so it cannot waste its limit repeating one.
 
     Every ply is otherwise delegated untouched to `Game.play_tick`.
 
@@ -31,6 +42,9 @@ class GameRunner:
         discards: Registry resolving each seat's discard policy, or `None` to
             keep catanatron's uniformly random discard.
         dev_card_timing: The timing rule, or `None` when disabled.
+        trades: The trading protocol, or `None` when trading is off. Reset at
+            the start of every `play`; its `history` holds the last game's
+            offers.
         turn_limit: Completed turns after which a game is truncated, matching
             catanatron's own safety valve.
     """
@@ -39,6 +53,7 @@ class GameRunner:
         self,
         discards: DiscardPolicyRegistry | DiscardPolicy | None = None,
         enforce_dev_card_timing: bool = True,
+        trading: TradingRules | None = DEFAULT_TRADING_RULES,
         turn_limit: int = TURNS_LIMIT,
     ) -> None:
         """Configure the runner.
@@ -49,10 +64,12 @@ class GameRunner:
             enforce_dev_card_timing: Whether to forbid playing a development
                 card the turn it was bought. Defaults to True (official rules);
                 False reproduces the stock engine, for ablations.
+            trading: Limits on domestic trading, or `None` to switch it off.
             turn_limit: Completed turns after which to truncate a game.
         """
         self.discards = self._as_registry(discards)
         self.dev_card_timing = DevCardTimingRule() if enforce_dev_card_timing else None
+        self.trades = TradeProtocol(trading) if trading else None
         self.turn_limit = turn_limit
 
     def play(self, game: Game, accumulators: Sequence[GameAccumulator] = ()) -> Game:
@@ -69,6 +86,8 @@ class GameRunner:
         Returns:
             The same game, now finished or truncated.
         """
+        if self.trades is not None:
+            self.trades.reset()
         for accumulator in accumulators:
             accumulator.before(game.copy())
         while game.winning_color() is None and game.state.num_turns < self.turn_limit:
@@ -93,7 +112,77 @@ class GameRunner:
         ):
             return self._execute_discard(game, accumulators)
         self._enforce_dev_card_timing(game)
+        self._run_trades(game)
         return game.play_tick(accumulators=list(accumulators))
+
+    def _run_trades(self, game: Game) -> None:
+        """Let an active trading bot make offers before its next decision.
+
+        Args:
+            game: Game whose active player may trade; hands change in place.
+        """
+        state = game.state
+        color = state.current_color()
+        player = state.current_player()
+        if self.trades is None or not isinstance(player, TradingPlayer):
+            return
+        while self.trades.can_propose(state, color):
+            offers = self._fresh_offers(game, color)
+            offer = player.propose_trade(game, offers) if offers else None
+            if offer is None:
+                return
+            self.trades.propose(state, color, offer)
+            self._collect_answers(game)
+            self._settle_offer(game, player)
+            self._enforce_dev_card_timing(game)
+
+    def _fresh_offers(self, game: Game, color: Color) -> list[TradeOffer]:
+        """List the offers a seat may make that it has not made this turn.
+
+        Args:
+            game: Game being played.
+            color: Colour of the proposer.
+
+        Returns:
+            Legal offers minus any already made this turn.
+        """
+        turn = game.state.num_turns
+        made = {r.offer for r in self.trades.history if r.turn == turn}
+        return [o for o in self.trades.legal_offers(game.state, color) if o not in made]
+
+    def _collect_answers(self, game: Game) -> None:
+        """Ask every due seat to answer the open offer.
+
+        Trading bots decide for themselves; every other seat declines.
+
+        Args:
+            game: Game with an open offer.
+        """
+        players = {player.color: player for player in game.state.players}
+        negotiation = self.trades.negotiation
+        while negotiation is not None and negotiation.awaiting is not None:
+            responder = players[negotiation.awaiting]
+            accept = isinstance(
+                responder, TradingPlayer
+            ) and responder.respond_to_trade(game, negotiation)
+            self.trades.respond(game.state, responder.color, accept)
+            negotiation = self.trades.negotiation
+
+    def _settle_offer(self, game: Game, proposer: TradingPlayer) -> None:
+        """Let the proposer trade with an acceptor or walk away.
+
+        Args:
+            game: Game whose offer has every answer in, or has closed.
+            proposer: The bot that made the offer.
+        """
+        negotiation = self.trades.negotiation
+        if negotiation is None:
+            return
+        partner = proposer.choose_trade_partner(game, negotiation)
+        if partner in negotiation.acceptors:
+            self.trades.confirm(game.state, partner)
+        else:
+            self.trades.cancel()
 
     def _execute_discard(
         self, game: Game, accumulators: Sequence[GameAccumulator]
@@ -164,7 +253,11 @@ class GameRunner:
         """Return a debug representation naming the active rules."""
         discard = type(self.discards.default).__name__ if self.discards else "engine"
         timing = self.dev_card_timing is not None
-        return f"{type(self).__name__}(discard={discard}, dev_card_timing={timing})"
+        trading = self.trades is not None
+        return (
+            f"{type(self).__name__}(discard={discard}, dev_card_timing={timing}, "
+            f"trading={trading})"
+        )
 
 
 def seat_registry(

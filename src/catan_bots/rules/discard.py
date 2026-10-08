@@ -26,35 +26,11 @@ from collections.abc import Mapping, Sequence
 from itertools import combinations_with_replacement
 
 from catanatron import Color, Game
-from catanatron.models.decks import (
-    CITY_COST_FREQDECK,
-    DEVELOPMENT_CARD_COST_FREQDECK,
-    ROAD_COST_FREQDECK,
-    SETTLEMENT_COST_FREQDECK,
-)
 from catanatron.models.enums import CITY, RESOURCES, SETTLEMENT
 from catanatron.state import State
 from catanatron.state_functions import get_player_buildings, player_deck_to_array
 
-BuildCost = Mapping[str, int]
-
-
-def _freqdeck_to_cost(freqdeck: Sequence[int]) -> dict[str, int]:
-    """Convert a catanatron cost freqdeck into a resource-keyed cost.
-
-    Args:
-        freqdeck: Counts in `RESOURCES` order, as used by catanatron's decks.
-
-    Returns:
-        Mapping of resource name to required count, omitting zero entries.
-    """
-    return {r: n for r, n in zip(RESOURCES, freqdeck) if n}
-
-
-CITY_COST = _freqdeck_to_cost(CITY_COST_FREQDECK)
-SETTLEMENT_COST = _freqdeck_to_cost(SETTLEMENT_COST_FREQDECK)
-DEVELOPMENT_CARD_COST = _freqdeck_to_cost(DEVELOPMENT_CARD_COST_FREQDECK)
-ROAD_COST = _freqdeck_to_cost(ROAD_COST_FREQDECK)
+from catan_bots.rules.builds import BUILD_TARGETS, BuildTarget, reachable_targets
 
 
 def discard_count(hand_size: int) -> int:
@@ -304,12 +280,7 @@ class BuildPlanDiscard(DiscardPolicy):
         TARGETS: Build costs in descending strategic value.
     """
 
-    TARGETS: tuple[tuple[str, BuildCost], ...] = (
-        (CITY, CITY_COST),
-        (SETTLEMENT, SETTLEMENT_COST),
-        ("DEVELOPMENT_CARD", DEVELOPMENT_CARD_COST),
-        ("ROAD", ROAD_COST),
-    )
+    TARGETS: tuple[BuildTarget, ...] = BUILD_TARGETS
 
     def choose(
         self,
@@ -350,60 +321,16 @@ class BuildPlanDiscard(DiscardPolicy):
         Returns:
             Count per resource name to keep, totalling `keep_budget`.
         """
-        targets = self._reachable_targets(state, color)
+        targets = reachable_targets(state, color)
         reserved = self._reserve_funded_targets(hand, targets, keep_budget)
         self._add_partial_progress(hand, targets, reserved, keep_budget)
         self._add_hardest_to_replace(state, color, hand, reserved, keep_budget)
         return reserved
 
-    def _reachable_targets(
-        self, state: State, color: Color
-    ) -> list[tuple[str, BuildCost]]:
-        """List the build targets this player could still spend resources on.
-
-        A target the player can never build — no pieces left in supply, no
-        settlement to upgrade, an empty development deck — is worth no cards.
-
-        Args:
-            state: Game state to read.
-            color: Colour of the discarding player.
-
-        Returns:
-            Costs of the reachable targets, in descending strategic value.
-        """
-        return [
-            (name, cost)
-            for name, cost in self.TARGETS
-            if self._is_reachable(state, color, name)
-        ]
-
-    @staticmethod
-    def _is_reachable(state: State, color: Color, target: str) -> bool:
-        """Judge whether one build target is still available to a player.
-
-        Args:
-            state: Game state to read.
-            color: Colour of the discarding player.
-            target: Target name, as used in `TARGETS`.
-
-        Returns:
-            True if the player could still build it later this game.
-        """
-        key = f"P{state.color_to_index[color]}"
-        if target == CITY:
-            return bool(state.player_state[f"{key}_CITIES_AVAILABLE"]) and bool(
-                get_player_buildings(state, color, SETTLEMENT)
-            )
-        if target == SETTLEMENT:
-            return bool(state.player_state[f"{key}_SETTLEMENTS_AVAILABLE"])
-        if target == "ROAD":
-            return bool(state.player_state[f"{key}_ROADS_AVAILABLE"])
-        return bool(state.development_listdeck)
-
     @staticmethod
     def _reserve_funded_targets(
         hand: Mapping[str, int],
-        targets: Sequence[tuple[str, BuildCost]],
+        targets: Sequence[BuildTarget],
         keep_budget: int,
     ) -> Counter[str]:
         """Reserve the cards for every target the hand can fully fund.
@@ -417,7 +344,8 @@ class BuildPlanDiscard(DiscardPolicy):
             Count per resource name reserved for fully funded targets.
         """
         reserved: Counter[str] = Counter()
-        for _, cost in targets:
+        for target in targets:
+            cost = target.cost
             affordable = all(
                 reserved[resource] + count <= hand.get(resource, 0)
                 for resource, count in cost.items()
@@ -430,7 +358,7 @@ class BuildPlanDiscard(DiscardPolicy):
     @staticmethod
     def _add_partial_progress(
         hand: Mapping[str, int],
-        targets: Sequence[tuple[str, BuildCost]],
+        targets: Sequence[BuildTarget],
         reserved: Counter[str],
         keep_budget: int,
     ) -> None:
@@ -445,8 +373,8 @@ class BuildPlanDiscard(DiscardPolicy):
             reserved: Reservations so far; extended in place.
             keep_budget: Number of cards the player may keep.
         """
-        for _, cost in targets:
-            for resource, count in cost.items():
+        for target in targets:
+            for resource, count in target.cost.items():
                 while (
                     reserved[resource] < count
                     and reserved[resource] < hand.get(resource, 0)

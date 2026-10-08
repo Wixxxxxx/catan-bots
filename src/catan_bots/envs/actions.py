@@ -11,6 +11,10 @@ Discarding on a seven is exposed as five synthetic "discard one card of this
 resource" actions, chosen repeatedly until half the hand is gone. That keeps
 the branching factor at five while still letting the agent pick any of the
 legal discard selections.
+
+Domestic trading, which catanatron does not model, adds synthetic slots too:
+one per offer in the trading catalog, accept, reject, cancel, and "trade with
+the seat N places after the proposer" for each possible partner.
 """
 
 from collections.abc import Hashable, Iterable, Sequence
@@ -23,8 +27,14 @@ from catanatron.state import State
 
 from catan_bots.envs.topology import BoardTopology
 from catan_bots.observation import ObservationBuilder
+from catan_bots.rules.trading import TradeOffer
 
 DISCARD_CARD = "DISCARD_CARD"
+PROPOSE_TRADE = "PROPOSE_TRADE"
+ACCEPT_TRADE = "ACCEPT_TRADE"
+REJECT_TRADE = "REJECT_TRADE"
+CANCEL_TRADE = "CANCEL_TRADE"
+CONFIRM_TRADE = "CONFIRM_TRADE"
 MARITIME_RATES = (2, 3, 4)
 
 ActionKey = tuple[Hashable, ...]
@@ -45,24 +55,35 @@ class ActionTable:
     play knight, play road building), five discard picks, a settlement and a
     city per node, a road per edge, a robber move per tile and victim seat
     offset (0 meaning no victim), every year-of-plenty draw, a monopoly per
-    resource, and a maritime trade per give resource, rate and get resource.
+    resource, a maritime trade per give resource, rate and get resource, a
+    proposal per trade offer, accept, reject, cancel, and a confirmation per
+    partner seat offset.
 
     Attributes:
         topology: Board geometry the table was laid out for.
-        max_players: Largest table size the robber slots allow for.
+        max_players: Largest table size the robber and partner slots allow.
+        trade_offers: Offers given a proposal slot, in slot order.
         keys: Canonical key at each index.
     """
 
-    def __init__(self, topology: BoardTopology, max_players: int = 4) -> None:
+    def __init__(
+        self,
+        topology: BoardTopology,
+        max_players: int = 4,
+        trade_offers: Sequence[TradeOffer] = (),
+    ) -> None:
         """Lay out the table for one board geometry.
 
         Args:
             topology: Board geometry whose nodes, edges and tiles are indexed.
             max_players: Most seats a game can have; sets the robber-victim
-                slots so one table serves 2-, 3- and 4-player games.
+                and trade-partner slots so one table serves every size.
+            trade_offers: Offers to give proposal slots. Kept even when
+                trading is switched off, so spaces match across settings.
         """
         self.topology = topology
         self.max_players = max_players
+        self.trade_offers = tuple(trade_offers)
         self.keys: tuple[ActionKey, ...] = tuple(self._enumerate_keys())
         self._index: dict[ActionKey, int] = {k: i for i, k in enumerate(self.keys)}
 
@@ -138,6 +159,39 @@ class ActionTable:
                 raise ValueError(f"{action} and {legal[index]} share slot {index}.")
             legal[index] = action
         return legal
+
+    def index(self, key: ActionKey) -> int:
+        """Look up the index of a canonical key.
+
+        Args:
+            key: A key present in the table.
+
+        Returns:
+            Its index.
+        """
+        return self._index[key]
+
+    def propose_index(self, offer: TradeOffer) -> int:
+        """Look up the index of proposing a trade offer.
+
+        Args:
+            offer: An offer from the trading catalog.
+
+        Returns:
+            The proposal's index.
+        """
+        return self._index[(PROPOSE_TRADE, offer.give, offer.want)]
+
+    def confirm_index(self, partner_offset: int) -> int:
+        """Look up the index of trading with an accepting seat.
+
+        Args:
+            partner_offset: The partner's seat offset from the proposer.
+
+        Returns:
+            The confirmation's index.
+        """
+        return self._index[(CONFIRM_TRADE, partner_offset)]
 
     def discard_index(self, resource: str) -> int:
         """Look up the index of discarding one card of a resource.
@@ -220,6 +274,9 @@ class ActionTable:
             for get in RESOURCES
             if get != give
         ]
+        keys += [(PROPOSE_TRADE, o.give, o.want) for o in self.trade_offers]
+        keys += [(ACCEPT_TRADE,), (REJECT_TRADE,), (CANCEL_TRADE,)]
+        keys += [(CONFIRM_TRADE, offset) for offset in range(1, self.max_players)]
         return keys
 
     @staticmethod

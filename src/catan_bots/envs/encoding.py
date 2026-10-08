@@ -17,7 +17,7 @@ from catanatron.models.enums import RESOURCES, ActionPrompt
 from gymnasium import spaces
 
 from catan_bots.envs.topology import BoardTopology
-from catan_bots.observation import Observation, PublicSeatView
+from catan_bots.observation import Observation, PublicSeatView, TradeView
 from catan_bots.rules.discard import SequentialDiscard
 
 MAX_PLAYERS = 4
@@ -42,6 +42,8 @@ EDGE_FEATURES = MAX_PLAYERS
 BANK_FEATURES = 5 + 1
 PHASE_FEATURES = len(PROMPTS) + MAX_PLAYERS + MAX_PLAYERS + 5
 DISCARD_FEATURES = 1 + 5
+TRADE_FEATURES = 1 + MAX_PLAYERS + 5 + 5 + 2 * MAX_PLAYERS + MAX_PLAYERS + 1
+TRADE_CARD_CAP = 3
 
 
 def _scaled(value: float, cap: float) -> float:
@@ -74,12 +76,15 @@ class ObservationEncoder:
     """Turn observations into fixed-length `float32` vectors.
 
     Layout, in order: own hand (16), four seat blocks (20 each), tiles
-    (17 each), nodes (12 each), edges (4 each), bank and deck (6), phase (18)
-    and discard progress (6) — 1,385 features on the base map. Seats, node owners and edge owners are by seat
+    (17 each), nodes (12 each), edges (4 each), bank and deck (6), phase (18),
+    discard progress (6) and the trade on the table (28) — 1,413 features on
+    the base map. The trade block is all zero when trading is off, so the
+    layout is the same either way. Seats, node owners and edge owners are by seat
     offset, so slot 0 is always the observing seat.
 
     Attributes:
         topology: Board geometry fixing the tile, node and edge slot order.
+        blocks: Where each named block sits in the vector, in order.
         size: Length of every encoded vector.
     """
 
@@ -90,16 +95,36 @@ class ObservationEncoder:
             topology: Board geometry whose tiles, nodes and edges are encoded.
         """
         self.topology = topology
-        self.size = (
-            HAND_FEATURES
-            + MAX_PLAYERS * SEAT_FEATURES
-            + len(topology.tiles) * TILE_FEATURES
-            + len(topology.nodes) * NODE_FEATURES
-            + len(topology.edges) * EDGE_FEATURES
-            + BANK_FEATURES
-            + PHASE_FEATURES
-            + DISCARD_FEATURES
-        )
+        self.blocks = self._lay_out_blocks(topology)
+        self.size = next(reversed(self.blocks.values())).stop
+
+    @staticmethod
+    def _lay_out_blocks(topology: BoardTopology) -> dict[str, slice]:
+        """Assign each feature block its slice of the vector.
+
+        Args:
+            topology: Board geometry fixing the tile, node and edge counts.
+
+        Returns:
+            Slice per block name, in encoding order.
+        """
+        sizes = {
+            "hand": HAND_FEATURES,
+            "seats": MAX_PLAYERS * SEAT_FEATURES,
+            "tiles": len(topology.tiles) * TILE_FEATURES,
+            "nodes": len(topology.nodes) * NODE_FEATURES,
+            "edges": len(topology.edges) * EDGE_FEATURES,
+            "bank": BANK_FEATURES,
+            "phase": PHASE_FEATURES,
+            "discard": DISCARD_FEATURES,
+            "trade": TRADE_FEATURES,
+        }
+        blocks: dict[str, slice] = {}
+        start = 0
+        for name, length in sizes.items():
+            blocks[name] = slice(start, start + length)
+            start += length
+        return blocks
 
     def space(self) -> spaces.Box:
         """Describe the encoded vectors as a Gymnasium space.
@@ -134,6 +159,7 @@ class ObservationEncoder:
             + self._bank(observation)
             + self._phase(observation)
             + self._discard(discard)
+            + self._trade(observation.trade)
         )
         if len(features) != self.size:
             raise ValueError(f"Encoded {len(features)} features, expected {self.size}.")
@@ -304,3 +330,32 @@ class ObservationEncoder:
         return [_scaled(discard.remaining, 20)] + [
             _scaled(discard.chosen[r], 19) for r in RESOURCES
         ]
+
+    @staticmethod
+    def _trade(trade: TradeView | None) -> list[float]:
+        """Encode the trade offer on the table.
+
+        Args:
+            trade: The trade view, or `None` when trading is off.
+
+        Returns:
+            28 features: open flag, proposer offset, offered and wanted cards,
+            each seat's answer (accepted, rejected; both zero while pending),
+            the seat due to answer, and the share of this turn's offers used.
+            All zero when trading is off.
+        """
+        if trade is None:
+            return [0.0] * TRADE_FEATURES
+        answers: list[float] = []
+        for offset in range(MAX_PLAYERS):
+            answer = trade.responses.get(offset)
+            answers += [float(answer is True), float(answer is False)]
+        return (
+            [float(trade.is_open)]
+            + _one_hot(range(MAX_PLAYERS), trade.proposer_seat_offset)
+            + [_scaled(trade.give.get(r, 0), TRADE_CARD_CAP) for r in RESOURCES]
+            + [_scaled(trade.want.get(r, 0), TRADE_CARD_CAP) for r in RESOURCES]
+            + answers
+            + _one_hot(range(MAX_PLAYERS), trade.awaiting_seat_offset)
+            + [_scaled(trade.offers_made_this_turn, trade.max_offers_per_turn)]
+        )

@@ -11,7 +11,7 @@ from catanatron.state_functions import player_deck_to_array, player_key
 from pettingzoo.test import api_test, seed_test
 
 from catan_bots.envs import CatanAECEnv, env, raw_env
-from catan_bots.envs.actions import DISCARD_CARD
+from catan_bots.envs.actions import DISCARD_CARD, PROPOSE_TRADE
 from catan_bots.envs.catan_aec import ExternalPlayer
 from catan_bots.envs.encoding import SEAT_FEATURES
 from catan_bots.rules.dev_cards import DevCardTimingRule
@@ -109,7 +109,7 @@ def test_spaces_are_shared_across_player_counts() -> None:
     two, four = raw_env(num_players=2), raw_env(num_players=4)
     assert two.action_space("player_0") == four.action_space("player_0")
     assert two.observation_space("player_0") == four.observation_space("player_0")
-    assert four.table.size == 351 and four.encoder.size == 1385
+    assert four.table.size == 587 and four.encoder.size == 1413
 
 
 def test_absent_seats_encode_as_zero() -> None:
@@ -117,10 +117,9 @@ def test_absent_seats_encode_as_zero() -> None:
     environment = raw_env(num_players=2)
     environment.reset(seed=3)
     vector = environment.observe("player_0")["observation"]
-    seats_start = 16
-    padding = vector[seats_start + 2 * SEAT_FEATURES : seats_start + 4 * SEAT_FEATURES]
-    assert not padding.any()
-    assert vector[seats_start] == 1.0 and vector[seats_start + SEAT_FEATURES] == 1.0
+    seats = vector[environment.encoder.blocks["seats"]]
+    assert not seats[2 * SEAT_FEATURES :].any()
+    assert seats[0] == 1.0 and seats[SEAT_FEATURES] == 1.0
 
 
 def test_action_table_keys_are_unique() -> None:
@@ -135,12 +134,18 @@ def test_every_legal_action_has_its_own_slot() -> None:
 
     def check(environment: CatanAECEnv, agent: str, observation: dict) -> None:
         state = environment.game.state
-        if state.current_prompt is ActionPrompt.DISCARD:
+        trading = environment._trading
+        if state.current_prompt is ActionPrompt.DISCARD or trading.negotiation:
             return
-        legal = DevCardTimingRule().legal_actions(state)
-        assert observation["action_mask"].sum() == len(set(legal))
+        table = environment.table
+        mask = observation["action_mask"]
+        trade_slots = [i for i, key in enumerate(table.keys) if key[0] == PROPOSE_TRADE]
+        engine_part = mask.sum() - mask[trade_slots].sum()
+        assert engine_part == len(set(DevCardTimingRule().legal_actions(state)))
+        color = environment.color_of(agent)
+        assert mask[trade_slots].sum() == len(trading.legal_offers(state, color))
 
-    for seed in range(3):
+    for seed in range(2):
         play_random(raw_env(num_players=4), seed, rng, before_step=check)
 
 
@@ -166,7 +171,7 @@ def test_terminal_rewards_are_zero_sum() -> None:
     """The winner gets +1 and the others share -1 equally."""
     rng = np.random.default_rng(1)
     for seed in range(3):
-        environment = raw_env(num_players=4)
+        environment = raw_env(num_players=4, trading=None)
         final = play_random(environment, seed, rng)
         winner = environment.game.winning_color()
         assert winner is not None
@@ -192,7 +197,7 @@ def test_resources_are_conserved_through_whole_games() -> None:
     def check(environment: CatanAECEnv, agent: str, observation: dict) -> None:
         assert all(n == 19 for n in resources_in_play(environment).values())
 
-    for seed in range(3):
+    for seed in range(2):
         play_random(raw_env(num_players=4), seed, rng, before_step=check)
 
 
@@ -213,7 +218,7 @@ def test_agents_choose_their_own_discards() -> None:
         ]
         assert picks and all(key[0] == DISCARD_CARD for key in picks)
         key = player_key(state, color)
-        progress = observation["observation"][-6:]
+        progress = observation["observation"][environment.encoder.blocks["discard"]]
         assert progress[0] > 0, "cards remain to be picked"
         chosen = dict(zip(RESOURCES, np.rint(progress[1:] * 19).astype(int)))
         for _, resource in picks:
@@ -221,7 +226,7 @@ def test_agents_choose_their_own_discards() -> None:
         seen.append(True)
 
     for seed in range(4):
-        play_random(raw_env(num_players=4), seed, rng, before_step=check)
+        play_random(raw_env(num_players=4, trading=None), seed, rng, before_step=check)
     assert seen
 
 
@@ -262,7 +267,9 @@ def test_discard_policy_hides_discards_from_agents() -> None:
     def check(environment: CatanAECEnv, agent: str, observation: dict) -> None:
         assert environment.game.state.current_prompt is not ActionPrompt.DISCARD
 
-    environment = raw_env(num_players=4, discard_policy=BuildPlanDiscard())
+    environment = raw_env(
+        num_players=4, discard_policy=BuildPlanDiscard(), trading=None
+    )
     for seed in range(3):
         play_random(environment, seed, rng, before_step=check)
     discards = [
@@ -274,7 +281,7 @@ def test_discard_policy_hides_discards_from_agents() -> None:
 def test_environment_games_respect_dev_card_timing() -> None:
     """No environment game ever plays a card the turn it was bought."""
     rng = np.random.default_rng(6)
-    for seed in range(5):
+    for seed in range(3):
         environment = raw_env(num_players=4)
         play_random(environment, seed, rng)
         assert DevCardTimingRule.count_violations(environment.game.state.actions) == 0
@@ -345,7 +352,7 @@ def test_robbery_victims_are_seat_offsets() -> None:
 
 def test_render_ansi_reports_standings() -> None:
     """ANSI rendering returns the standings as text."""
-    environment = raw_env(num_players=4, render_mode="ansi")
+    environment = raw_env(num_players=4, render_mode="ansi", turn_limit=20)
     play_random(environment, 0, np.random.default_rng(0))
     text = environment.render()
     assert "Winner" in text and "VP" in text

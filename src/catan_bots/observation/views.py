@@ -20,6 +20,10 @@ Private — only the perspective seat sees it, and only for itself:
     of those it may play this turn, and its actual victory points (including
     VP cards).
 
+Public as well — trading happens in the open:
+    The offer on the table, who made it, how each seat has answered so far,
+    and how many offers the active player has made this turn.
+
 Hidden from every seat:
     Opponents' hands by type, opponents' unplayed development cards by type,
     opponents' hidden VP cards, and the development deck's order.
@@ -155,6 +159,32 @@ class PhaseView:
 
 
 @dataclass(frozen=True)
+class TradeView:
+    """The trade offer on the table. Offers and answers are made openly.
+
+    Attributes:
+        is_open: Whether an offer is going round the table now.
+        proposer_seat_offset: Seat offset of the proposer, or `None`.
+        give: Cards the proposer offers, per resource; empty when closed.
+        want: Cards the proposer asks for, per resource; empty when closed.
+        responses: Answers so far, by the answering seat's offset: True for
+            accept.
+        awaiting_seat_offset: Seat offset due to answer next, or `None`.
+        offers_made_this_turn: Offers the active player has made this turn.
+        max_offers_per_turn: The per-turn limit on offers.
+    """
+
+    is_open: bool
+    proposer_seat_offset: int | None
+    give: dict[str, int]
+    want: dict[str, int]
+    responses: dict[int, bool]
+    awaiting_seat_offset: int | None
+    offers_made_this_turn: int
+    max_offers_per_turn: int
+
+
+@dataclass(frozen=True)
 class Observation:
     """One seat's complete, redacted view of a position.
 
@@ -168,6 +198,7 @@ class Observation:
         bank_resources: Resource cards left in the bank, per type.
         development_deck_size: Development cards left to draw.
         phase: Turn and phase information.
+        trade: The trade offer on the table, or `None` when trading is off.
     """
 
     perspective: Color
@@ -178,6 +209,7 @@ class Observation:
     bank_resources: dict[str, int]
     development_deck_size: int
     phase: PhaseView
+    trade: TradeView | None = None
 
     @property
     def opponents(self) -> tuple[PublicSeatView, ...]:

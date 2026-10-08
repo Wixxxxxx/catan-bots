@@ -8,6 +8,7 @@ from catanatron.models.map import CatanMap
 from catanatron.models.player import Player
 
 from catan_bots.rules.discard import DiscardPolicy, DiscardPolicyRegistry
+from catan_bots.rules.trading import DEFAULT_TRADING_RULES, TradingRules
 from catan_bots.runner import GameRunner
 
 
@@ -27,6 +28,8 @@ class GameFactory:
             catanatron's built-in uniformly random discard.
         enforce_dev_card_timing: Whether played games forbid playing a
             development card the turn it was bought (the official rule).
+        trading: Limits on domestic trading in played games, or `None` for
+            none.
     """
 
     def __init__(
@@ -36,6 +39,7 @@ class GameFactory:
         catan_map: CatanMap | None = None,
         discard_policy: DiscardPolicy | DiscardPolicyRegistry | None = None,
         enforce_dev_card_timing: bool = True,
+        trading: TradingRules | None = DEFAULT_TRADING_RULES,
     ) -> None:
         """Store the roster and rules used for every created game.
 
@@ -51,6 +55,8 @@ class GameFactory:
             enforce_dev_card_timing: Whether to forbid playing a development
                 card the turn it was bought. Defaults to True, the official
                 rule; False reproduces the stock engine, for ablations.
+            trading: Limits on domestic trading, or `None` to switch it off.
+                Only bots implementing `TradingPlayer` make or accept offers.
 
         Raises:
             ValueError: If the roster is empty or holds more than four players.
@@ -62,6 +68,7 @@ class GameFactory:
         self.catan_map = catan_map
         self.discard_policy = discard_policy
         self.enforce_dev_card_timing = enforce_dev_card_timing
+        self.trading = trading
 
     def create(self, seed: int | None = None) -> Game:
         """Build one un-played game with freshly reset players.
@@ -92,7 +99,7 @@ class GameFactory:
         """Build a game and run it to completion.
 
         Always runs through a `GameRunner`, which applies this factory's
-        discard policy and development-card timing rule.
+        discard policy, development-card timing rule and trading limits.
 
         Args:
             seed: Random seed for the game. Defaults to a random seed.
@@ -109,12 +116,13 @@ class GameFactory:
         """Build the runner that applies this factory's rules.
 
         Returns:
-            A `GameRunner` configured with this factory's discard policy and
-            development-card timing setting.
+            A `GameRunner` configured with this factory's discard policy,
+            development-card timing setting and trading limits.
         """
         return GameRunner(
             discards=self.discard_policy,
             enforce_dev_card_timing=self.enforce_dev_card_timing,
+            trading=self.trading,
         )
 
     @staticmethod

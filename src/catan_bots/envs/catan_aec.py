@@ -12,7 +12,16 @@ from gymnasium import logger, spaces
 from pettingzoo import AECEnv
 
 from catan_bots.analytics.reports import GameReport
-from catan_bots.envs.actions import ActionTable
+from catan_bots.envs.actions import (
+    ACCEPT_TRADE,
+    CANCEL_TRADE,
+    CONFIRM_TRADE,
+    DISCARD_CARD,
+    PROPOSE_TRADE,
+    REJECT_TRADE,
+    ActionKey,
+    ActionTable,
+)
 from catan_bots.envs.encoding import MAX_PLAYERS, ObservationEncoder
 from catan_bots.envs.random_stream import RandomStream
 from catan_bots.envs.topology import BoardTopology
@@ -24,6 +33,13 @@ from catan_bots.rules.discard import (
     DiscardPolicyRegistry,
     SequentialDiscard,
     hand_counts,
+)
+from catan_bots.rules.trading import (
+    DEFAULT_TRADING_RULES,
+    TradeOffer,
+    TradeProtocol,
+    TradingRules,
+    enumerate_offers,
 )
 
 SEAT_COLORS = (Color.RED, Color.BLUE, Color.ORANGE, Color.WHITE)
@@ -68,10 +84,19 @@ class CatanAECEnv(AECEnv):
     or the deck's order. Seats are encoded relative to the observer and
     padded to four, so one policy serves every seat and player count.
 
-    **Actions.** `Discrete(n)` over `ActionTable` (351 on the base map),
-    always used with the mask. Robbery victims are seat offsets. Playing a
-    development card the turn it was bought is never legal when
-    `enforce_dev_card_timing` is set.
+    **Actions.** `Discrete(n)` over `ActionTable` (587 on the base map with
+    two-card offers), always used with the mask. Robbery victims and trade
+    partners are seat offsets. Playing a development card the turn it was
+    bought is never legal when `enforce_dev_card_timing` is set.
+
+    **Trading.** On by default (`trading=TradingRules()`): after rolling, the
+    active agent may propose an offer from the catalog; every other agent,
+    in play order, accepts or rejects (seats that cannot pay are declined
+    automatically); the proposer then trades with one acceptor or cancels.
+    While an offer is open the decider comes from the trade protocol, not
+    the engine. Offers and answers are public and appear in every
+    observation. With `trading=None` no trade slot is ever legal, but the
+    spaces are unchanged, so one policy serves both settings.
 
     **Discarding on a seven.** With no `discard_policy`, the discarding agent
     decides: it is offered five "discard one card of this resource" actions
@@ -108,6 +133,7 @@ class CatanAECEnv(AECEnv):
     def __init__(
         self,
         num_players: int = 4,
+        trading: TradingRules | None = DEFAULT_TRADING_RULES,
         discard_policy: DiscardPolicy | DiscardPolicyRegistry | None = None,
         enforce_dev_card_timing: bool = True,
         vps_to_win: int = 10,
@@ -118,6 +144,8 @@ class CatanAECEnv(AECEnv):
 
         Args:
             num_players: Seats per game, 2 to 4. Defaults to 4.
+            trading: Limits on domestic trading, or `None` to switch trading
+                off. Defaults to two-card offers, three per turn.
             discard_policy: Policy that discards on agents' behalf, or `None`
                 (the default) to make discarding an agent decision.
             enforce_dev_card_timing: Whether a development card may not be
@@ -143,13 +171,17 @@ class CatanAECEnv(AECEnv):
         self._agent_of = {color: agent for agent, color in self._color_of.items()}
         self._discards = self._as_registry(discard_policy)
         self._dev_card_timing = DevCardTimingRule() if enforce_dev_card_timing else None
+        self._trading = TradeProtocol(trading) if trading else None
         self._random = RandomStream()
         self._factory = GameFactory(
             [ExternalPlayer(color) for color in colors], vps_to_win=vps_to_win
         )
         with self._random.active():
             topology = BoardTopology.from_map(CatanMap.from_template(BASE_MAP_TEMPLATE))
-        self.table = ActionTable(topology, MAX_PLAYERS)
+        catalog = enumerate_offers(
+            (trading or DEFAULT_TRADING_RULES).max_cards_per_side
+        )
+        self.table = ActionTable(topology, MAX_PLAYERS, catalog)
         self.encoder = ObservationEncoder(topology)
         self._builder = ObservationBuilder()
         self._action_space = spaces.Discrete(self.table.size)
@@ -165,6 +197,14 @@ class CatanAECEnv(AECEnv):
         self._legal_actions: dict[int, Action] = {}
         self._legal_indices: frozenset[int] = frozenset()
         self._pending_discard: SequentialDiscard | None = None
+        self._handlers = {
+            DISCARD_CARD: self._pick_discard,
+            PROPOSE_TRADE: self._propose_trade,
+            ACCEPT_TRADE: self._accept_trade,
+            REJECT_TRADE: self._reject_trade,
+            CONFIRM_TRADE: self._confirm_trade,
+            CANCEL_TRADE: self._cancel_trade,
+        }
 
     def observation_space(self, agent: str) -> spaces.Dict:
         """Return the observation space, identical for every agent.
@@ -204,6 +244,8 @@ class CatanAECEnv(AECEnv):
         self.infos = {agent: {} for agent in self.agents}
         self._skip_agent_selection = None
         self._pending_discard = None
+        if self._trading is not None:
+            self._trading.reset()
         with self._random.active():
             self.game = self._factory.create(seed)
         self._auto_resolve_discards()
@@ -241,7 +283,7 @@ class CatanAECEnv(AECEnv):
             The encoded redacted view and the agent's action mask.
         """
         color = self._color_of[agent]
-        observation = self._builder.build(self.game.state, color)
+        observation = self._builder.build(self.game.state, color, self._trading)
         discard = self._pending_discard
         own_discard = (
             discard if discard is not None and discard.color is color else None
@@ -294,21 +336,75 @@ class CatanAECEnv(AECEnv):
         """
         if index not in self._legal_indices:
             raise ValueError(f"Action {index} is not legal for {self.agent_selection}.")
-        resource = self.table.discard_resource(index)
-        if resource is not None:
-            self._pick_discard(resource)
+        key = self.table.keys[index]
+        handler = self._handlers.get(key[0])
+        if handler is not None:
+            handler(key)
             return
         with self._random.active():
             self.game.execute(self._legal_actions[index])
 
-    def _pick_discard(self, resource: str) -> None:
+    def _decider_color(self) -> Color:
+        """Return the colour of the agent deciding now.
+
+        Returns:
+            The deciding agent's colour.
+        """
+        return self._color_of[self.agent_selection]
+
+    def _propose_trade(self, key: ActionKey) -> None:
+        """Open the deciding agent's trade offer.
+
+        Args:
+            key: A `PROPOSE_TRADE` key carrying the offer's two sides.
+        """
+        offer = TradeOffer(key[1], key[2])
+        self._trading.propose(self.game.state, self._decider_color(), offer)
+
+    def _accept_trade(self, key: ActionKey) -> None:
+        """Accept the open offer on the deciding agent's behalf.
+
+        Args:
+            key: The `ACCEPT_TRADE` key.
+        """
+        self._trading.respond(self.game.state, self._decider_color(), accept=True)
+
+    def _reject_trade(self, key: ActionKey) -> None:
+        """Reject the open offer on the deciding agent's behalf.
+
+        Args:
+            key: The `REJECT_TRADE` key.
+        """
+        self._trading.respond(self.game.state, self._decider_color(), accept=False)
+
+    def _confirm_trade(self, key: ActionKey) -> None:
+        """Complete the open offer with the seat the proposer picked.
+
+        Args:
+            key: A `CONFIRM_TRADE` key carrying the partner's seat offset
+                from the proposer.
+        """
+        order = self.game.state.colors
+        proposer = self._decider_color()
+        partner = order[(order.index(proposer) + key[1]) % len(order)]
+        self._trading.confirm(self.game.state, partner)
+
+    def _cancel_trade(self, key: ActionKey) -> None:
+        """Close the open offer without trading.
+
+        Args:
+            key: The `CANCEL_TRADE` key.
+        """
+        self._trading.cancel()
+
+    def _pick_discard(self, key: ActionKey) -> None:
         """Add one card to the deciding agent's discard, executing it when full.
 
         Args:
-            resource: Resource of the card picked.
+            key: A `DISCARD_CARD` key carrying the resource picked.
         """
         discard = self._pending_discard
-        discard.choose_card(resource)
+        discard.choose_card(key[1])
         if discard.is_complete:
             self._execute_discard(discard, discard.color)
 
@@ -365,6 +461,11 @@ class CatanAECEnv(AECEnv):
         self._legal_actions, self._legal_indices = {}, frozenset()
         if self._is_over():
             return
+        trade_decider = self._trading.decider() if self._trading else None
+        if trade_decider is not None:
+            self.agent_selection = self._agent_of[trade_decider]
+            self._legal_indices = self._trade_choices(trade_decider)
+            return
         state = self.game.state
         color = state.current_color()
         self.agent_selection = self._agent_of[color]
@@ -372,7 +473,45 @@ class CatanAECEnv(AECEnv):
             self._load_discard_picks(color)
             return
         self._legal_actions = self.table.legal_by_index(state, self._engine_legal())
-        self._legal_indices = frozenset(self._legal_actions)
+        self._legal_indices = frozenset(self._legal_actions) | self._proposals(color)
+
+    def _trade_choices(self, decider: Color) -> frozenset[int]:
+        """List the decider's options while an offer is open.
+
+        Args:
+            decider: Colour that must act in the negotiation.
+
+        Returns:
+            Accept and reject for a responder (accept only if it can pay);
+            for the proposer, trading with each acceptor or cancelling.
+        """
+        negotiation = self._trading.negotiation
+        if negotiation.awaiting is decider:
+            choices = {self.table.index((REJECT_TRADE,))}
+            if self._trading.can_pay(self.game.state, decider, negotiation.offer):
+                choices.add(self.table.index((ACCEPT_TRADE,)))
+            return frozenset(choices)
+        order = self.game.state.colors
+        start = order.index(decider)
+        partners = {
+            self.table.confirm_index((order.index(c) - start) % len(order))
+            for c in negotiation.acceptors
+        }
+        return frozenset(partners | {self.table.index((CANCEL_TRADE,))})
+
+    def _proposals(self, color: Color) -> frozenset[int]:
+        """List the offers a seat may propose right now.
+
+        Args:
+            color: Colour of the deciding seat.
+
+        Returns:
+            Proposal indices; empty with trading off or proposing not allowed.
+        """
+        if self._trading is None:
+            return frozenset()
+        offers = self._trading.legal_offers(self.game.state, color)
+        return frozenset(self.table.propose_index(offer) for offer in offers)
 
     def _load_discard_picks(self, color: Color) -> None:
         """Offer the discarding agent its card-by-card discard choices.

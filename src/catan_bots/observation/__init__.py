@@ -7,6 +7,7 @@ from catan_bots.observation.views import (
     PhaseView,
     PrivateHandView,
     PublicSeatView,
+    TradeView,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "PhaseView",
     "PrivateHandView",
     "PublicSeatView",
+    "TradeView",
 ]

@@ -18,9 +18,11 @@ from catan_bots.observation.views import (
     PhaseView,
     PrivateHandView,
     PublicSeatView,
+    TradeView,
 )
 from catan_bots.rules.dev_cards import DevCardTimingRule
 from catan_bots.rules.discard import hand_counts
+from catan_bots.rules.trading import TradeProtocol
 
 
 class ObservationBuilder:
@@ -53,12 +55,19 @@ class ObservationBuilder:
         """
         self.dev_card_timing = dev_card_timing or DevCardTimingRule()
 
-    def build(self, state: State, perspective: Color) -> Observation:
+    def build(
+        self,
+        state: State,
+        perspective: Color,
+        trading: TradeProtocol | None = None,
+    ) -> Observation:
         """Build one seat's redacted view of the current position.
 
         Args:
             state: Full game state. It is only read.
             perspective: Colour of the seat whose view is built.
+            trading: The game's trading protocol, or `None` when trading is
+                off, in which case the observation carries no trade view.
 
         Returns:
             The seat's `Observation`.
@@ -83,6 +92,7 @@ class ObservationBuilder:
             bank_resources=dict(zip(RESOURCES, state.resource_freqdeck)),
             development_deck_size=len(state.development_listdeck),
             phase=self._phase(state, perspective),
+            trade=self._trade(state, perspective, trading) if trading else None,
         )
 
     @staticmethod
@@ -204,6 +214,46 @@ class ObservationBuilder:
                 for resource, nodes in board.map.port_nodes.items()
                 for node in nodes
             },
+        )
+
+    def _trade(
+        self, state: State, perspective: Color, trading: TradeProtocol
+    ) -> TradeView:
+        """Read the trade offer on the table, with seats as offsets.
+
+        Args:
+            state: Game state, read for seating and the turn number.
+            perspective: The seat the observation is built for.
+            trading: The game's trading protocol.
+
+        Returns:
+            The `TradeView`; closed and empty when no offer is open.
+        """
+        made = trading.offers_made_this_turn(state)
+        limit = trading.rules.max_offers_per_turn
+        negotiation = trading.negotiation
+        if negotiation is None:
+            return TradeView(False, None, {}, {}, {}, None, made, limit)
+
+        awaiting = negotiation.awaiting
+        return TradeView(
+            is_open=True,
+            proposer_seat_offset=self.seat_offset(
+                state, perspective, negotiation.proposer
+            ),
+            give=negotiation.offer.give_counts,
+            want=negotiation.offer.want_counts,
+            responses={
+                self.seat_offset(state, perspective, color): accepted
+                for color, accepted in negotiation.responses.items()
+            },
+            awaiting_seat_offset=(
+                None
+                if awaiting is None
+                else self.seat_offset(state, perspective, awaiting)
+            ),
+            offers_made_this_turn=made,
+            max_offers_per_turn=limit,
         )
 
     def _phase(self, state: State, perspective: Color) -> PhaseView:

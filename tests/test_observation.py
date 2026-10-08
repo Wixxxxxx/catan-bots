@@ -23,6 +23,7 @@ from catanatron.state_functions import (
 from catan_bots.analytics.board_stats import TileSummary
 from catan_bots.games import GameFactory
 from catan_bots.observation import Observation, ObservationBuilder
+from catan_bots.rules.trading import TradeOffer, TradeProtocol
 
 ROSTER = (Color.RED, Color.BLUE, Color.ORANGE, Color.WHITE)
 BUILDER = ObservationBuilder()
@@ -241,37 +242,106 @@ def test_unseated_perspective_is_rejected() -> None:
         BUILDER.build(game.state, Color.ORANGE)
 
 
+def assert_plain_values(value: object, path: str = "observation") -> None:
+    """Assert a value contains only plain data, recursively.
+
+    Allowed: primitives, colours, tuples, frozensets, dicts, and dataclasses
+    defined by the observation package (plus `TileSummary`).
+
+    Args:
+        value: The value to inspect.
+        path: Where the value sits, for failure messages.
+    """
+    if dataclasses.is_dataclass(value):
+        module = type(value).__module__
+        assert isinstance(value, TileSummary) or module.startswith(
+            "catan_bots.observation"
+        ), f"{path}: unexpected dataclass {type(value).__name__}"
+        for field in dataclasses.fields(value):
+            assert_plain_values(getattr(value, field.name), f"{path}.{field.name}")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            assert_plain_values(key, f"{path}[key]")
+            assert_plain_values(item, f"{path}[{key!r}]")
+    elif isinstance(value, (tuple, frozenset)):
+        for index, item in enumerate(value):
+            assert_plain_values(item, f"{path}[{index}]")
+    else:
+        assert isinstance(value, (int, float, str, bool, type(None), Color)), (
+            f"{path}: {type(value).__name__} is not a plain value"
+        )
+
+
 def test_observation_holds_no_engine_objects(game: Game) -> None:
     """Structural guard: an observation contains only plain values.
 
     Fails if anyone later threads a `State`, `Board`, list (such as the
     development deck) or other live engine object into a view.
     """
-    allowed_leaves = (int, float, str, bool, type(None), Color)
-
-    def check(value: object, path: str) -> None:
-        if dataclasses.is_dataclass(value):
-            assert isinstance(value, (TileSummary,)) or type(
-                value
-            ).__module__.startswith("catan_bots.observation"), (
-                f"{path}: unexpected dataclass {type(value).__name__}"
-            )
-            for field in dataclasses.fields(value):
-                check(getattr(value, field.name), f"{path}.{field.name}")
-        elif isinstance(value, dict):
-            for k, v in value.items():
-                check(k, f"{path}[key]")
-                check(v, f"{path}[{k!r}]")
-        elif isinstance(value, (tuple, frozenset)):
-            for i, item in enumerate(value):
-                check(item, f"{path}[{i}]")
-        else:
-            assert isinstance(value, allowed_leaves), (
-                f"{path}: {type(value).__name__} is not a plain value"
-            )
-
     for color in game.state.colors:
-        check(BUILDER.build(game.state, color), "observation")
+        assert_plain_values(BUILDER.build(game.state, color))
+
+
+def open_trade(seed: int = 4) -> tuple[Game, Color, TradeProtocol]:
+    """Open a wood-for-ore offer from the active player of a fresh game.
+
+    Args:
+        seed: Game seed.
+
+    Returns:
+        The game, the proposer and the protocol holding the open offer.
+    """
+    game = GameFactory([RandomPlayer(c) for c in ROSTER]).create(seed=seed)
+    while game.state.is_initial_build_phase:
+        game.play_tick()
+    active = game.state.current_color()
+    game.execute(Action(active, ActionType.ROLL, (2, 3)), validate_action=False)
+    for color in game.state.colors:
+        key = player_key(game.state, color)
+        game.state.player_state[f"{key}_WOOD_IN_HAND"] = 2
+        game.state.player_state[f"{key}_ORE_IN_HAND"] = 2
+    protocol = TradeProtocol()
+    protocol.propose(game.state, active, TradeOffer.of({"WOOD": 1}, {"ORE": 1}))
+    return game, active, protocol
+
+
+def test_open_offer_is_seen_by_every_seat() -> None:
+    """The offer, its proposer and the answers so far are public."""
+    game, active, protocol = open_trade()
+    first = protocol.decider()
+    protocol.respond(game.state, first, accept=True)
+    for perspective in game.state.colors:
+        trade = BUILDER.build(game.state, perspective, protocol).trade
+        assert trade.is_open
+        assert trade.give == {"WOOD": 1} and trade.want == {"ORE": 1}
+        assert trade.proposer_seat_offset == ObservationBuilder.seat_offset(
+            game.state, perspective, active
+        )
+        first_offset = ObservationBuilder.seat_offset(game.state, perspective, first)
+        assert trade.responses == {first_offset: True}
+        assert trade.offers_made_this_turn == 1
+
+
+def test_closed_trade_view_is_empty() -> None:
+    """With no offer open the view is closed but still counts offers."""
+    game, active, protocol = open_trade()
+    for _ in range(3):
+        protocol.respond(game.state, protocol.decider(), accept=False)
+    trade = BUILDER.build(game.state, active, protocol).trade
+    assert not trade.is_open and trade.give == {} and trade.responses == {}
+    assert trade.offers_made_this_turn == 1 and trade.max_offers_per_turn == 3
+
+
+def test_no_trade_view_without_trading(game: Game) -> None:
+    """Building without a protocol leaves the trade view out."""
+    assert BUILDER.build(game.state, Color.RED).trade is None
+
+
+def test_trade_view_holds_only_plain_values() -> None:
+    """The structural guard also holds with an offer open."""
+    game, _, protocol = open_trade()
+    for color in game.state.colors:
+        assert_plain_values(BUILDER.build(game.state, color, protocol))
 
 
 def test_bank_and_deck_size_are_public(game: Game) -> None:
