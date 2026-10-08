@@ -95,9 +95,10 @@ catan-bots/
 ├── main.py              # entry point
 ├── src/catan_bots/      # package code
 │   ├── games.py         # game construction and seeding
-│   ├── runner.py        # play loop with policy-resolved discards
+│   ├── runner.py        # play loop enforcing the official rules
 │   ├── bots/            # playable bots
 │   ├── rules/           # rules catanatron leaves unmodelled
+│   ├── observation/     # redacted per-seat views (no hidden information)
 │   └── analytics/       # reports, board stats, tournaments
 ├── notebooks/           # research notebooks (no production code)
 ├── tests/               # pytest suites

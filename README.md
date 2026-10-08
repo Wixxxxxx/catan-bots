@@ -20,6 +20,40 @@ imports those modules.
 
 ## Project log
 
+### 2026-10-08 — Official dev-card timing and redacted observations
+
+**Status:** Roadmap approved. Step 1 (redacted observations) and the
+development-card timing fix are done. Next: the PettingZoo AEC environment.
+
+**Approved roadmap:**
+
+1. Redacted per-seat observations — done.
+2. PettingZoo AEC environment driven by `state.current_color()`.
+3. Strong non-RL baselines (value function, depth-2 alpha-beta).
+4. Self-play training: shared-policy MaskablePPO, then league play.
+5. Player-to-player trading — required to replicate the real game.
+6. Rules fidelity: dev-card timing (done); `TURNS_LIMIT` handled as
+   truncation, not a loss, inside the environment.
+
+**Development-card timing.** Official rules forbid playing a development card
+the turn it was bought. Catanatron only enforces one card per turn, and over
+300 games about **half of all development-card plays** were these illegal
+same-turn plays (55% in 2-player, 50% in 4-player).
+[src/catan_bots/rules/dev_cards.py](src/catan_bots/rules/dev_cards.py) derives
+the cards bought this turn from the action log and strips their plays before
+every decision. It is on by default in `GameRunner` and `GameFactory`, which
+now always plays through the runner; `enforce_dev_card_timing=False`
+reproduces the stock engine for ablations.
+
+**Redacted observations.** [src/catan_bots/observation/](src/catan_bots/observation/)
+defines exactly what a seat may know. Opponents' hands and development cards
+appear only as counts; the deck's order and hidden VP cards are never exposed;
+board ownership is recorded as seat offsets so one shared policy sees the
+board the same way from every chair. Leak-invariance tests change each hidden
+fact and assert no other seat's view moves; four deliberately injected leaks
+were each caught by the matching test.
+
+
 ### 2026-10-08 — Discard-on-seven is now a modelled decision
 
 **Status:** Discard rules implemented and measured. Masked observations,
