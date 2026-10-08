@@ -20,6 +20,39 @@ imports those modules.
 
 ## Project log
 
+### 2026-10-08 — Multi-agent environment
+
+**Status:** Step 2 done. The environment supports 2, 3 and 4 players behind
+`num_players` (default 4, the focus). Next: player-to-player trading, ahead of
+baselines and training so no model is trained on a game without it.
+
+**What it is:** [src/catan_bots/envs/](src/catan_bots/envs/), a PettingZoo AEC
+environment that passes PettingZoo's own `api_test` at every size and its
+`seed_test`.
+
+- **Turn structure.** The decider is always the engine's
+  `state.current_color()`, so out-of-turn discards on a seven are handled.
+- **Actions.** A fixed `Discrete(351)` table with a mask, shared by every seat
+  and player count. Robbery victims are seat offsets, never colours.
+- **Observations.** 1,385 features in [0, 1], encoded only from the redacted
+  `Observation`, so the vector cannot leak hidden information. Seats are
+  relative to the observer and padded to four.
+- **Discarding.** With no policy, the agent discards card by card — five
+  options per step, any legal selection reachable. With a policy, discards
+  resolve automatically.
+- **Rules.** Development-card timing is enforced.
+- **Reward.** Zero-sum and terminal: +1 to the winner, -1/(n-1) to the rest.
+  Hitting `turn_limit` is a truncation with zero reward, not an outcome, so
+  stalling earns a losing agent nothing.
+- **Randomness.** Each environment owns a `RandomStream`, fixing the
+  global-RNG interleaving problem: environments stepped alternately in one
+  process now reproduce exactly from their seeds.
+
+**Throughput:** ~1,800 steps/s for 4 players with masked random agents, single
+core. Encoding is plain Python and is the obvious optimisation target once
+training shows where time goes.
+
+
 ### 2026-10-08 — Official dev-card timing and redacted observations
 
 **Status:** Roadmap approved. Step 1 (redacted observations) and the

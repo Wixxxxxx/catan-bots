@@ -17,7 +17,8 @@ tracked separately: catanatron logs each purchase as
 log, so the rule holds on any state, including copies used for lookahead.
 """
 
-from collections import Counter
+from collections import Counter, defaultdict
+from collections.abc import Iterable
 from typing import ClassVar
 
 from catanatron import Action, ActionType, Color
@@ -105,6 +106,39 @@ class DevCardTimingRule:
         """
         held = state.player_state[f"{player_key(state, color)}_{card}_IN_HAND"]
         return max(0, held - bought[card])
+
+    @classmethod
+    def count_violations(cls, actions: Iterable[Action]) -> int:
+        """Audit an action log for plays of cards bought the same turn.
+
+        Cards only enter a hand by purchase and leave it by being played, so
+        the copies a player may play are those bought in earlier turns and not
+        yet spent. Useful for auditing recorded or training games.
+
+        Args:
+            actions: A game's action log, oldest first.
+
+        Returns:
+            Number of plays of a card with no copy bought before that turn.
+        """
+        owned: defaultdict[Color, Counter[str]] = defaultdict(Counter)
+        bought: defaultdict[Color, Counter[str]] = defaultdict(Counter)
+        violations = 0
+        for action in actions:
+            kind, color = action.action_type, action.color
+            if kind is ActionType.BUY_DEVELOPMENT_CARD:
+                bought[color][action.value] += 1
+            elif kind in cls.PLAY_ACTIONS:
+                card = cls.PLAY_ACTIONS[kind]
+                if owned[color][card] > 0:
+                    owned[color][card] -= 1
+                else:
+                    violations += 1
+                    bought[color][card] -= 1
+            elif kind is ActionType.END_TURN:
+                owned[color].update(bought[color])
+                bought[color].clear()
+        return violations
 
     def _is_allowed(
         self, state: State, color: Color, action: Action, bought: Counter[str]

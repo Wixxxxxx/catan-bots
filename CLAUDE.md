@@ -99,6 +99,7 @@ catan-bots/
 │   ├── bots/            # playable bots
 │   ├── rules/           # rules catanatron leaves unmodelled
 │   ├── observation/     # redacted per-seat views (no hidden information)
+│   ├── envs/            # PettingZoo AEC environment, action table, encoder
 │   └── analytics/       # reports, board stats, tournaments
 ├── notebooks/           # research notebooks (no production code)
 ├── tests/               # pytest suites

@@ -488,6 +488,88 @@ class BuildPlanDiscard(DiscardPolicy):
                 reserved[resource] += 1
 
 
+class SequentialDiscard(DiscardPolicy):
+    """A discard assembled one card at a time by an outside decider.
+
+    Lets a learning agent make the full discard decision with only five
+    options per step — "discard one card of this resource" — repeated until
+    half the hand is chosen. Once complete it resolves like any other policy,
+    so the result is validated before it reaches the engine.
+
+    Attributes:
+        color: Colour of the discarding player.
+        hand: The player's hand when the discard began.
+        required: Number of cards that must be discarded.
+        chosen: Cards picked so far, per resource.
+    """
+
+    def __init__(self, color: Color, hand: Mapping[str, int]) -> None:
+        """Begin a discard for one player.
+
+        Args:
+            color: Colour of the discarding player.
+            hand: Count per resource name in that player's hand.
+        """
+        self.color = color
+        self.hand = {resource: hand.get(resource, 0) for resource in RESOURCES}
+        self.required = discard_count(sum(self.hand.values()))
+        self.chosen: Counter[str] = Counter()
+
+    @property
+    def remaining(self) -> int:
+        """Cards still to be picked."""
+        return self.required - sum(self.chosen.values())
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether every required card has been picked."""
+        return self.remaining == 0
+
+    def choosable(self) -> list[str]:
+        """List the resources that may be picked next.
+
+        Returns:
+            Resources with an unpicked card left in hand, in `RESOURCES`
+            order; empty once the discard is complete.
+        """
+        if self.is_complete:
+            return []
+        return [r for r in RESOURCES if self.hand[r] - self.chosen[r] > 0]
+
+    def choose_card(self, resource: str) -> None:
+        """Pick one card of a resource to discard.
+
+        Args:
+            resource: Resource to discard one card of.
+
+        Raises:
+            ValueError: If that resource cannot be picked now.
+        """
+        if resource not in self.choosable():
+            raise ValueError(f"Cannot discard {resource} now.")
+        self.chosen[resource] += 1
+
+    def choose(
+        self,
+        game: Game,
+        color: Color,
+        hand: Mapping[str, int],
+        num_to_discard: int,
+    ) -> Sequence[str]:
+        """Return the cards picked so far.
+
+        Args:
+            game: Unused.
+            color: Unused.
+            hand: Unused.
+            num_to_discard: Unused; `resolve` checks the count.
+
+        Returns:
+            The picked cards, as a canonical listdeck.
+        """
+        return listdeck_from_counts(self.chosen)
+
+
 class DiscardPolicyRegistry:
     """Decide which discard policy governs each seat.
 
