@@ -25,6 +25,8 @@ class GameFactory:
         catan_map: Optional fixed map; `None` builds the standard base map.
         discard_policy: Policy resolving discard-on-seven, or `None` to keep
             catanatron's built-in uniformly random discard.
+        enforce_dev_card_timing: Whether played games forbid playing a
+            development card the turn it was bought (the official rule).
     """
 
     def __init__(
@@ -33,6 +35,7 @@ class GameFactory:
         vps_to_win: int = 10,
         catan_map: CatanMap | None = None,
         discard_policy: DiscardPolicy | DiscardPolicyRegistry | None = None,
+        enforce_dev_card_timing: bool = True,
     ) -> None:
         """Store the roster and rules used for every created game.
 
@@ -45,6 +48,9 @@ class GameFactory:
                 a player discards on a seven. Defaults to `None`, which leaves
                 catanatron's uniformly random discard in place so parity with
                 the stock engine stays the baseline.
+            enforce_dev_card_timing: Whether to forbid playing a development
+                card the turn it was bought. Defaults to True, the official
+                rule; False reproduces the stock engine, for ablations.
 
         Raises:
             ValueError: If the roster is empty or holds more than four players.
@@ -55,9 +61,14 @@ class GameFactory:
         self.vps_to_win = vps_to_win
         self.catan_map = catan_map
         self.discard_policy = discard_policy
+        self.enforce_dev_card_timing = enforce_dev_card_timing
 
     def create(self, seed: int | None = None) -> Game:
         """Build one un-played game with freshly reset players.
+
+        The game is not bound to this factory's rules: run it with `play`, or
+        through a `GameRunner`, rather than `Game.play`, which applies none of
+        them.
 
         Args:
             seed: Random seed for the game. The same seed with the same roster
@@ -80,8 +91,8 @@ class GameFactory:
     ) -> Game:
         """Build a game and run it to completion.
 
-        Runs through a `GameRunner` when a discard policy is configured, and
-        through catanatron's own loop otherwise.
+        Always runs through a `GameRunner`, which applies this factory's
+        discard policy and development-card timing rule.
 
         Args:
             seed: Random seed for the game. Defaults to a random seed.
@@ -92,11 +103,19 @@ class GameFactory:
             catanatron's turn limit without a winner.
         """
         game = self.create(seed)
-        hooks = list(accumulators or [])
-        if self.discard_policy is None:
-            game.play(accumulators=hooks)
-            return game
-        return GameRunner(self.discard_policy).play(game, hooks)
+        return self.runner().play(game, list(accumulators or []))
+
+    def runner(self) -> GameRunner:
+        """Build the runner that applies this factory's rules.
+
+        Returns:
+            A `GameRunner` configured with this factory's discard policy and
+            development-card timing setting.
+        """
+        return GameRunner(
+            discards=self.discard_policy,
+            enforce_dev_card_timing=self.enforce_dev_card_timing,
+        )
 
     @staticmethod
     def _seed_global_rng(seed: int | None) -> None:

@@ -1,4 +1,4 @@
-"""Play games to completion while resolving discards through a policy."""
+"""Play games under the official rules catanatron leaves unenforced."""
 
 from collections.abc import Sequence
 
@@ -6,43 +6,53 @@ from catanatron import Action, Color, Game, GameAccumulator
 from catanatron.game import TURNS_LIMIT
 from catanatron.models.enums import ActionPrompt, ActionType
 
+from catan_bots.rules.dev_cards import DevCardTimingRule
 from catan_bots.rules.discard import DiscardPolicy, DiscardPolicyRegistry
 
 
 class GameRunner:
-    """Run games in which discarding on a seven is a real decision.
+    """Own the play loop so rules catanatron skips can be enforced.
 
-    Catanatron offers only `Action(color, DISCARD, None)` as legal and then
-    discards a random half, so a discard choice cannot travel through
-    `Player.decide`. This runner owns the play loop instead: on a discard
-    prompt it asks the seat's `DiscardPolicy` and executes the explicit
-    selection, bypassing the engine's action validation (which would reject any
-    discard other than the `None` placeholder). Every other ply is delegated
-    untouched to `Game.play_tick`.
+    Two rules are layered on top of the engine:
+
+    - **Discard on a seven.** Catanatron offers only
+      `Action(color, DISCARD, None)` and discards a random half, so a discard
+      choice cannot travel through `Player.decide`. With a policy configured,
+      the runner asks the seat's `DiscardPolicy` and executes the explicit
+      selection, bypassing the engine's validation (which would reject any
+      discard other than the `None` placeholder).
+    - **Development-card timing.** Before every decision the playable actions
+      are filtered so a card cannot be played the turn it was bought. Bots and
+      the engine's own validation both read the filtered list.
+
+    Every ply is otherwise delegated untouched to `Game.play_tick`.
 
     Attributes:
-        discards: Registry resolving each seat's discard policy.
+        discards: Registry resolving each seat's discard policy, or `None` to
+            keep catanatron's uniformly random discard.
+        dev_card_timing: The timing rule, or `None` when disabled.
         turn_limit: Completed turns after which a game is truncated, matching
             catanatron's own safety valve.
     """
 
     def __init__(
         self,
-        discards: DiscardPolicyRegistry | DiscardPolicy,
+        discards: DiscardPolicyRegistry | DiscardPolicy | None = None,
+        enforce_dev_card_timing: bool = True,
         turn_limit: int = TURNS_LIMIT,
     ) -> None:
         """Configure the runner.
 
         Args:
-            discards: Either a registry of per-seat policies, or a single
-                policy applied to every seat.
+            discards: A registry of per-seat policies, a single policy applied
+                to every seat, or `None` to keep catanatron's random discard.
+            enforce_dev_card_timing: Whether to forbid playing a development
+                card the turn it was bought. Defaults to True (official rules);
+                False reproduces the stock engine, for ablations.
             turn_limit: Completed turns after which to truncate a game.
         """
-        self.discards = (
-            discards
-            if isinstance(discards, DiscardPolicyRegistry)
-            else DiscardPolicyRegistry(discards)
-        )
+        self.discards = self._as_registry(discards)
+        self.dev_card_timing = DevCardTimingRule() if enforce_dev_card_timing else None
         self.turn_limit = turn_limit
 
     def play(self, game: Game, accumulators: Sequence[GameAccumulator] = ()) -> Game:
@@ -77,8 +87,12 @@ class GameRunner:
         Returns:
             The resolved action that was executed.
         """
-        if game.state.current_prompt is ActionPrompt.DISCARD:
+        if (
+            game.state.current_prompt is ActionPrompt.DISCARD
+            and self.discards is not None
+        ):
             return self._execute_discard(game, accumulators)
+        self._enforce_dev_card_timing(game)
         return game.play_tick(accumulators=list(accumulators))
 
     def _execute_discard(
@@ -100,6 +114,35 @@ class GameRunner:
         self._notify_step(game, action, accumulators)
         return game.execute(action, validate_action=False)
 
+    def _enforce_dev_card_timing(self, game: Game) -> None:
+        """Replace the playable actions with those the timing rule allows.
+
+        Reassigns `state.playable_actions` rather than mutating it, because
+        `State.copy` shares that list by reference.
+
+        Args:
+            game: Game about to ask its current player for a decision.
+        """
+        if self.dev_card_timing is None:
+            return
+        game.state.playable_actions = self.dev_card_timing.legal_actions(game.state)
+
+    @staticmethod
+    def _as_registry(
+        discards: DiscardPolicyRegistry | DiscardPolicy | None,
+    ) -> DiscardPolicyRegistry | None:
+        """Normalise the discard configuration to a registry.
+
+        Args:
+            discards: A registry, a single policy, or `None`.
+
+        Returns:
+            The registry, a registry wrapping the single policy, or `None`.
+        """
+        if discards is None or isinstance(discards, DiscardPolicyRegistry):
+            return discards
+        return DiscardPolicyRegistry(discards)
+
     @staticmethod
     def _notify_step(
         game: Game, action: Action, accumulators: Sequence[GameAccumulator]
@@ -118,8 +161,10 @@ class GameRunner:
             accumulator.step(snapshot, action)
 
     def __repr__(self) -> str:
-        """Return a debug representation naming the default discard policy."""
-        return f"{type(self).__name__}({type(self.discards.default).__name__})"
+        """Return a debug representation naming the active rules."""
+        discard = type(self.discards.default).__name__ if self.discards else "engine"
+        timing = self.dev_card_timing is not None
+        return f"{type(self).__name__}(discard={discard}, dev_card_timing={timing})"
 
 
 def seat_registry(

@@ -19,6 +19,7 @@ from catan_bots.bots import GreedySettlerBot
 from catan_bots.games import GameFactory
 from catan_bots.rules import (
     BuildPlanDiscard,
+    DevCardTimingRule,
     DiscardPolicy,
     DiscardPolicyRegistry,
     UniformRandomDiscard,
@@ -30,6 +31,7 @@ __all__ = [
     "ActionTypeCounter",
     "BoardInspector",
     "BuildPlanDiscard",
+    "DevCardTimingRule",
     "DiscardPolicy",
     "DiscardPolicyRegistry",
     "GameFactory",
