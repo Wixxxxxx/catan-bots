@@ -59,6 +59,43 @@ cores for the learner and the system. Each worker needs a few hundred MB.
 
 ## Project log
 
+### 2026-10-20 — Self-play trainer, and a first run that learns
+
+**Status:** Training works end to end and learns. Next: long runs on the Mac
+mini, aiming to beat a table of `GreedyTrader` bots, then stronger baselines.
+
+**Compute:** start on the 10-core Mac mini (16 GB), which costs nothing extra.
+Training is CPU-bound, not GPU-bound, and scales linearly with cores. If runs
+outgrow it, the fixed-monthly option is a rented multi-core server.
+
+**Speed:** profiling showed 30% of each step went on finding legal trade
+offers and 30% on building and encoding observations. Grouping offers by give
+side, sparse observation encoding (3.4x faster) and caching static board parts
+(1.5x faster) took a policy-driven process from 481 to 728 steps/s. Each
+rewrite was checked against the previous version on 44,679 live game states.
+Ruff is now a pinned dev dependency, so every machine lints the same way.
+
+**Trainer** ([src/catan_bots/training/](src/catan_bots/training/)): one shared
+network plays every learner seat. Each seat's moves form their own trajectory,
+so credit and each seat's end-of-game reward reach the right player — unlike
+PettingZoo's SB3 bridge, which merges all seats into one stream. 80% of games
+are pure self-play; the rest put past snapshots or baseline bots in one to
+three seats. Checkpoints are atomic and runs resume.
+
+**First learning check** (this repo's 4-core dev machine, about 45 minutes,
+VP shaping on). Evaluation puts the policy in one seat against three copies of
+a baseline; chance is 25%.
+
+| Iteration | Decisions | vs random | vs `GreedySettler` |
+|---|---|---|---|
+| 15 | 320k | 48.3% [36.2, 60.7] | 28.3% [18.5, 40.8] |
+| 30 | 622k | 78.3% [66.4, 86.9] | 36.7% [25.6, 49.3] |
+| 45 | 919k | 98.3% [91.1, 99.7] | 51.7% [39.3, 63.8] |
+
+Iteration 45 over 200 games per opponent: `GreedySettler` 55.5% [48.6, 62.2],
+`WeightedRandom` 45.5% [38.7, 52.4], `GreedyTrader` 29.5% [23.6, 36.2]. A
+table of three trading bots, which trade with each other, is not yet beaten.
+
 ### 2026-10-08 — Player-to-player trading
 
 **Status:** Step 5 done, ahead of baselines and training as agreed, so no
