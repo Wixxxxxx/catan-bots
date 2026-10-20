@@ -11,7 +11,7 @@ from collections.abc import Mapping
 
 import pytest
 from catanatron import Action, ActionType, Color, Game
-from catanatron.models.enums import ActionPrompt, RESOURCES
+from catanatron.models.enums import RESOURCES, ActionPrompt
 from catanatron.models.player import RandomPlayer
 from catanatron.state_functions import (
     player_deck_replenish,

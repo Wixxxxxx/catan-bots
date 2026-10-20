@@ -1,9 +1,13 @@
 """Build a seat's redacted `Observation` from catanatron's omniscient `State`."""
 
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import ClassVar
 
 from catanatron import Color
+from catanatron.models.board import Board
 from catanatron.models.enums import DEVELOPMENT_CARDS, RESOURCES
+from catanatron.models.map import CatanMap
 from catanatron.state import State
 from catanatron.state_functions import (
     player_key,
@@ -11,7 +15,7 @@ from catanatron.state_functions import (
     player_num_resource_cards,
 )
 
-from catan_bots.analytics.board_stats import BoardInspector
+from catan_bots.analytics.board_stats import BoardInspector, TileSummary
 from catan_bots.observation.views import (
     BoardView,
     Observation,
@@ -24,6 +28,23 @@ from catan_bots.rules.dev_cards import DevCardTimingRule
 from catan_bots.rules.discard import hand_counts
 from catan_bots.rules.trading import TradeProtocol
 
+SeatOffsets = dict[Color, int]
+
+
+@dataclass(frozen=True)
+class _StaticBoard:
+    """The parts of a map that never change during a game.
+
+    Attributes:
+        catan_map: The map these parts were read from.
+        tiles: Every land tile, ordered by cube coordinate.
+        ports: Node id to its port: a resource for 2:1, `None` for 3:1.
+    """
+
+    catan_map: CatanMap
+    tiles: tuple[TileSummary, ...]
+    ports: dict[int, str | None]
+
 
 class ObservationBuilder:
     """Turn a full game state into what one seat is allowed to know.
@@ -31,6 +52,9 @@ class ObservationBuilder:
     This is the only component that reads `State` on a policy's behalf.
     Anything downstream — a vector encoder, a network, a bot — that consumes
     only `Observation` cannot leak hidden information by construction.
+
+    The tiles and ports of the most recent map are cached, since they never
+    change during a game; everything else is read fresh on every call.
 
     Attributes:
         PLAYABLE_CARDS: Development cards that are played, as opposed to VP
@@ -54,6 +78,7 @@ class ObservationBuilder:
                 played. Defaults to the official same-turn restriction.
         """
         self.dev_card_timing = dev_card_timing or DevCardTimingRule()
+        self._static: _StaticBoard | None = None
 
     def build(
         self,
@@ -77,22 +102,22 @@ class ObservationBuilder:
         """
         if perspective not in state.colors:
             raise ValueError(f"{perspective} is not seated in this game.")
-        seats_in_play_order = sorted(
-            state.colors, key=lambda c: self.seat_offset(state, perspective, c)
-        )
+        offsets = self.seat_offsets(state, perspective)
+        static = self._static_board(state.board.map)
+        ports = self._port_access(state.board, static)
         return Observation(
             perspective=perspective,
             num_players=len(state.colors),
             hand=self._private_hand(state, perspective),
             seats=tuple(
-                self._public_seat(state, perspective, color)
-                for color in seats_in_play_order
+                self._public_seat(state, color, offsets[color], ports[color])
+                for color in sorted(state.colors, key=offsets.__getitem__)
             ),
-            board=self._board(state, perspective),
+            board=self._board(state, offsets, static),
             bank_resources=dict(zip(RESOURCES, state.resource_freqdeck)),
             development_deck_size=len(state.development_listdeck),
-            phase=self._phase(state, perspective),
-            trade=self._trade(state, perspective, trading) if trading else None,
+            phase=self._phase(state, offsets),
+            trade=self._trade(state, offsets, trading) if trading else None,
         )
 
     @staticmethod
@@ -110,15 +135,69 @@ class ObservationBuilder:
         order = state.colors
         return (order.index(color) - order.index(perspective)) % len(order)
 
+    @staticmethod
+    def seat_offsets(state: State, perspective: Color) -> SeatOffsets:
+        """Compute every seat's offset from the perspective in one pass.
+
+        Args:
+            state: Game state holding the seating order.
+            perspective: The reference seat.
+
+        Returns:
+            Seat offset per colour; the perspective itself is 0.
+        """
+        order = state.colors
+        start = order.index(perspective)
+        return {color: (i - start) % len(order) for i, color in enumerate(order)}
+
+    def _static_board(self, catan_map: CatanMap) -> _StaticBoard:
+        """Return the map's unchanging tiles and ports, reading them once per map.
+
+        Args:
+            catan_map: The game's map.
+
+        Returns:
+            The cached static parts of that map.
+        """
+        if self._static is None or self._static.catan_map is not catan_map:
+            ports = {
+                node: resource
+                for resource, nodes in catan_map.port_nodes.items()
+                for node in nodes
+            }
+            tiles = tuple(BoardInspector(catan_map).tile_summaries())
+            self._static = _StaticBoard(catan_map, tiles, ports)
+        return self._static
+
+    @staticmethod
+    def _port_access(board: Board, static: _StaticBoard) -> dict[Color, frozenset]:
+        """Work out which ports each colour has a building on.
+
+        Args:
+            board: The board, read for buildings.
+            static: The map's static parts, holding the port nodes.
+
+        Returns:
+            Port resources (`None` for 3:1) per colour; colours with no port
+            map to an empty set.
+        """
+        access: defaultdict[Color, set] = defaultdict(set)
+        for node, port in static.ports.items():
+            building = board.buildings.get(node)
+            if building is not None:
+                access[building[0]].add(port)
+        return defaultdict(frozenset, {c: frozenset(p) for c, p in access.items()})
+
     def _public_seat(
-        self, state: State, perspective: Color, color: Color
+        self, state: State, color: Color, offset: int, ports: frozenset
     ) -> PublicSeatView:
         """Read the table-visible facts about one seat.
 
         Args:
             state: Game state to read.
-            perspective: The seat the observation is built for.
             color: The seat being described.
+            offset: That seat's offset from the perspective.
+            ports: Ports that seat can trade through.
 
         Returns:
             That seat's `PublicSeatView`.
@@ -127,7 +206,7 @@ class ObservationBuilder:
         fields = state.player_state
         return PublicSeatView(
             color=color,
-            seat_offset=self.seat_offset(state, perspective, color),
+            seat_offset=offset,
             visible_victory_points=fields[f"{key}_VICTORY_POINTS"],
             resource_card_count=player_num_resource_cards(state, color),
             development_card_count=player_num_dev_cards(state, color),
@@ -140,7 +219,7 @@ class ObservationBuilder:
             longest_road_length=fields[f"{key}_LONGEST_ROAD_LENGTH"],
             has_longest_road=bool(fields[f"{key}_HAS_ROAD"]),
             has_largest_army=bool(fields[f"{key}_HAS_ARMY"]),
-            port_resources=frozenset(state.board.get_player_port_resources(color)),
+            port_resources=ports,
         )
 
     def _private_hand(self, state: State, perspective: Color) -> PrivateHandView:
@@ -187,43 +266,40 @@ class ObservationBuilder:
             for card in self.PLAYABLE_CARDS
         }
 
-    def _board(self, state: State, perspective: Color) -> BoardView:
+    @staticmethod
+    def _board(state: State, offsets: SeatOffsets, static: _StaticBoard) -> BoardView:
         """Read the board, recording ownership as seat offsets.
 
         Args:
             state: Game state to read.
-            perspective: The seat the observation is built for.
+            offsets: Seat offset per colour from the perspective.
+            static: The map's static parts.
 
         Returns:
-            The `BoardView`.
+            The `BoardView`, with its own copy of the port mapping.
         """
         board = state.board
         return BoardView(
-            tiles=tuple(BoardInspector(board.map).tile_summaries()),
+            tiles=static.tiles,
             robber_coordinate=board.robber_coordinate,
             buildings={
-                node: (self.seat_offset(state, perspective, color), building)
+                node: (offsets[color], building)
                 for node, (color, building) in board.buildings.items()
             },
             roads={
-                (min(edge), max(edge)): self.seat_offset(state, perspective, color)
+                (min(edge), max(edge)): offsets[color]
                 for edge, color in board.roads.items()
             },
-            ports={
-                node: resource
-                for resource, nodes in board.map.port_nodes.items()
-                for node in nodes
-            },
+            ports=dict(static.ports),
         )
 
-    def _trade(
-        self, state: State, perspective: Color, trading: TradeProtocol
-    ) -> TradeView:
+    @staticmethod
+    def _trade(state: State, offsets: SeatOffsets, trading: TradeProtocol) -> TradeView:
         """Read the trade offer on the table, with seats as offsets.
 
         Args:
-            state: Game state, read for seating and the turn number.
-            perspective: The seat the observation is built for.
+            state: Game state, read for the turn number.
+            offsets: Seat offset per colour from the perspective.
             trading: The game's trading protocol.
 
         Returns:
@@ -234,34 +310,28 @@ class ObservationBuilder:
         negotiation = trading.negotiation
         if negotiation is None:
             return TradeView(False, None, {}, {}, {}, None, made, limit)
-
         awaiting = negotiation.awaiting
         return TradeView(
             is_open=True,
-            proposer_seat_offset=self.seat_offset(
-                state, perspective, negotiation.proposer
-            ),
+            proposer_seat_offset=offsets[negotiation.proposer],
             give=negotiation.offer.give_counts,
             want=negotiation.offer.want_counts,
             responses={
-                self.seat_offset(state, perspective, color): accepted
+                offsets[color]: accepted
                 for color, accepted in negotiation.responses.items()
             },
-            awaiting_seat_offset=(
-                None
-                if awaiting is None
-                else self.seat_offset(state, perspective, awaiting)
-            ),
+            awaiting_seat_offset=None if awaiting is None else offsets[awaiting],
             offers_made_this_turn=made,
             max_offers_per_turn=limit,
         )
 
-    def _phase(self, state: State, perspective: Color) -> PhaseView:
+    @staticmethod
+    def _phase(state: State, offsets: SeatOffsets) -> PhaseView:
         """Read the turn and phase, with seats as offsets.
 
         Args:
             state: Game state to read.
-            perspective: The seat the observation is built for.
+            offsets: Seat offset per colour from the perspective.
 
         Returns:
             The `PhaseView`.
@@ -271,10 +341,8 @@ class ObservationBuilder:
         return PhaseView(
             prompt=state.current_prompt.name,
             turn_number=state.num_turns,
-            deciding_seat_offset=self.seat_offset(
-                state, perspective, state.current_color()
-            ),
-            turn_seat_offset=self.seat_offset(state, perspective, turn_color),
+            deciding_seat_offset=offsets[state.current_color()],
+            turn_seat_offset=offsets[turn_color],
             has_rolled=bool(state.player_state[f"{turn_key}_HAS_ROLLED"]),
             is_initial_build_phase=bool(state.is_initial_build_phase),
             is_road_building=bool(state.is_road_building),

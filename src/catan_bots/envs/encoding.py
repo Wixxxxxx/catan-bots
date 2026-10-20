@@ -45,6 +45,11 @@ DISCARD_FEATURES = 1 + 5
 TRADE_FEATURES = 1 + MAX_PLAYERS + 5 + 5 + 2 * MAX_PLAYERS + MAX_PLAYERS + 1
 TRADE_CARD_CAP = 3
 
+_TILE_RESOURCE_INDEX = {resource: i for i, resource in enumerate(TILE_RESOURCES)}
+_DICE_INDEX = {number: i for i, number in enumerate(DICE_NUMBERS)}
+_PORT_INDEX = {port: i for i, port in enumerate(PORTS)}
+_BUILDING_INDEX = {"SETTLEMENT": 0, "CITY": 1}
+
 
 def _scaled(value: float, cap: float) -> float:
     """Scale a count into [0, 1] by a cap, saturating at the cap.
@@ -97,6 +102,9 @@ class ObservationEncoder:
         self.topology = topology
         self.blocks = self._lay_out_blocks(topology)
         self.size = next(reversed(self.blocks.values())).stop
+        self._tile_slot = {coordinate: i for i, coordinate in enumerate(topology.tiles)}
+        self._node_slot = {node: i for i, node in enumerate(topology.nodes)}
+        self._edge_slot = {edge: i for i, edge in enumerate(topology.edges)}
 
     @staticmethod
     def _lay_out_blocks(topology: BoardTopology) -> dict[str, slice]:
@@ -139,6 +147,9 @@ class ObservationEncoder:
     ) -> np.ndarray:
         """Encode one seat's observation.
 
+        The board blocks are almost all zeros, so only their non-zero entries
+        are written; the small dense blocks are copied in whole.
+
         Args:
             observation: The seat's redacted view.
             discard: The seat's discard in progress, if it is mid-way through
@@ -146,24 +157,19 @@ class ObservationEncoder:
 
         Returns:
             A `float32` vector of length `size`.
-
-        Raises:
-            ValueError: If the layout produced the wrong number of features.
         """
-        features = (
-            self._hand(observation)
-            + self._seats(observation)
-            + self._tiles(observation)
-            + self._nodes(observation)
-            + self._edges(observation)
-            + self._bank(observation)
-            + self._phase(observation)
-            + self._discard(discard)
-            + self._trade(observation.trade)
-        )
-        if len(features) != self.size:
-            raise ValueError(f"Encoded {len(features)} features, expected {self.size}.")
-        return np.asarray(features, dtype=np.float32)
+        vector = np.zeros(self.size, dtype=np.float32)
+        blocks = self.blocks
+        vector[blocks["hand"]] = self._hand(observation)
+        vector[blocks["seats"]] = self._seats(observation)
+        self._write_tiles(vector, observation)
+        self._write_nodes(vector, observation)
+        self._write_edges(vector, observation)
+        vector[blocks["bank"]] = self._bank(observation)
+        vector[blocks["phase"]] = self._phase(observation)
+        vector[blocks["discard"]] = self._discard(discard)
+        vector[blocks["trade"]] = self._trade(observation.trade)
+        return vector
 
     @staticmethod
     def _hand(observation: Observation) -> list[float]:
@@ -226,60 +232,59 @@ class ObservationEncoder:
             + [1.0 if port in seat.port_resources else 0.0 for port in PORTS]
         )
 
-    def _tiles(self, observation: Observation) -> list[float]:
-        """Encode every land tile in topology order.
+    def _write_tiles(self, vector: np.ndarray, observation: Observation) -> None:
+        """Write every land tile's resource, dice number and robber flag.
+
+        17 features per tile, in topology order: resource one-hot (desert
+        included), dice-number one-hot (all zero for the desert) and robber.
 
         Args:
+            vector: Vector being filled; written in place.
             observation: The seat's view.
-
-        Returns:
-            17 features per tile: resource, dice number and robber.
         """
-        by_coordinate = {tile.coordinate: tile for tile in observation.board.tiles}
-        features: list[float] = []
-        for coordinate in self.topology.tiles:
-            tile = by_coordinate[coordinate]
-            features += _one_hot(TILE_RESOURCES, tile.resource)
-            features += _one_hot(DICE_NUMBERS, tile.number)
-            features += [float(coordinate == observation.board.robber_coordinate)]
-        return features
-
-    def _nodes(self, observation: Observation) -> list[float]:
-        """Encode every node's building and port in topology order.
-
-        Args:
-            observation: The seat's view.
-
-        Returns:
-            12 features per node: owner seat offset, building type and port.
-        """
+        start = self.blocks["tiles"].start
         board = observation.board
-        features: list[float] = []
-        for node in self.topology.nodes:
-            owner, building = board.buildings.get(node, (None, None))
-            features += _one_hot(range(MAX_PLAYERS), owner)
-            features += [float(building == "SETTLEMENT"), float(building == "CITY")]
-            features += (
-                _one_hot(PORTS, board.ports[node])
-                if node in board.ports
-                else [0.0] * len(PORTS)
-            )
-        return features
+        for tile in board.tiles:
+            base = start + self._tile_slot[tile.coordinate] * TILE_FEATURES
+            vector[base + _TILE_RESOURCE_INDEX[tile.resource]] = 1.0
+            if tile.number in _DICE_INDEX:
+                vector[base + len(TILE_RESOURCES) + _DICE_INDEX[tile.number]] = 1.0
+        robber = start + self._tile_slot[board.robber_coordinate] * TILE_FEATURES
+        vector[robber + TILE_FEATURES - 1] = 1.0
 
-    def _edges(self, observation: Observation) -> list[float]:
-        """Encode every edge's road owner in topology order.
+    def _write_nodes(self, vector: np.ndarray, observation: Observation) -> None:
+        """Write every node's building owner, building type and port.
+
+        12 features per node, in topology order: owner seat offset one-hot,
+        settlement and city flags, and port one-hot (3:1 first).
 
         Args:
+            vector: Vector being filled; written in place.
             observation: The seat's view.
-
-        Returns:
-            4 features per edge: the owner's seat offset, or all zero.
         """
-        roads = observation.board.roads
-        features: list[float] = []
-        for edge in self.topology.edges:
-            features += _one_hot(range(MAX_PLAYERS), roads.get(edge))
-        return features
+        start = self.blocks["nodes"].start
+        board = observation.board
+        for node, (owner, building) in board.buildings.items():
+            base = start + self._node_slot[node] * NODE_FEATURES
+            vector[base + owner] = 1.0
+            vector[base + MAX_PLAYERS + _BUILDING_INDEX[building]] = 1.0
+        for node, port in board.ports.items():
+            base = start + self._node_slot[node] * NODE_FEATURES
+            vector[base + MAX_PLAYERS + 2 + _PORT_INDEX[port]] = 1.0
+
+    def _write_edges(self, vector: np.ndarray, observation: Observation) -> None:
+        """Write every road's owner.
+
+        4 features per edge, in topology order: the owner's seat offset
+        one-hot, or all zero for an empty edge.
+
+        Args:
+            vector: Vector being filled; written in place.
+            observation: The seat's view.
+        """
+        start = self.blocks["edges"].start
+        for edge, owner in observation.board.roads.items():
+            vector[start + self._edge_slot[edge] * EDGE_FEATURES + owner] = 1.0
 
     @staticmethod
     def _bank(observation: Observation) -> list[float]:

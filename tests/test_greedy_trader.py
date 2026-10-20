@@ -13,6 +13,7 @@ from catan_bots.bots import GreedySettlerBot, GreedyTraderBot, TradingPlayer
 from catan_bots.games import GameFactory
 from catan_bots.rules.dev_cards import DevCardTimingRule
 from catan_bots.rules.trading import (
+    DEFAULT_TRADING_RULES,
     TradeNegotiation,
     TradeOffer,
     TradeProtocol,
@@ -191,7 +192,9 @@ def trader_roster() -> list:
     ]
 
 
-def play_with_trades(seed: int, rules: TradingRules | None = TradingRules()) -> tuple:
+def play_with_trades(
+    seed: int, rules: TradingRules | None = DEFAULT_TRADING_RULES
+) -> tuple:
     """Play one game of the trader roster through a runner.
 
     Args:

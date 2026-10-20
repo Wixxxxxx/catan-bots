@@ -145,8 +145,8 @@ class GameReport:
             cells = [f"{snapshot.color.value:10s}", f"{snapshot.victory_points:>7d}"]
             cells += [f"{snapshot.resources[r]:>7d}" for r in RESOURCES]
             cells += [
-                f"{str(snapshot.has_longest_road):>7s}",
-                f"{str(snapshot.has_largest_army):>7s}",
+                f"{snapshot.has_longest_road!s:>7s}",
+                f"{snapshot.has_largest_army!s:>7s}",
             ]
             rows.append("".join(cells))
         return "\n".join(rows)
@@ -164,8 +164,10 @@ class GameReport:
                 f"Turns        : {self.num_turns}",
                 f"Actions      : {len(self.action_log)}",
                 f"Longest Road : {self._holder_label(self.longest_road_holder)}",
-                f"Largest Army : {self._holder_label(self.largest_army_holder)}"
-                f" ({self.largest_army_size} knights)",
+                (
+                    f"Largest Army : {self._holder_label(self.largest_army_holder)}"
+                    f" ({self.largest_army_size} knights)"
+                ),
             ]
         )
 

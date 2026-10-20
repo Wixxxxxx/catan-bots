@@ -27,9 +27,10 @@ each resource in play is conserved. Trades are not engine actions and do not
 appear in `state.actions`; the protocol keeps its own `history`.
 """
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from functools import cached_property
 from itertools import combinations_with_replacement
 
 from catanatron import Color
@@ -91,14 +92,14 @@ class TradeOffer:
         """
         return cls(listdeck_from_counts(give), listdeck_from_counts(want))
 
-    @property
+    @cached_property
     def give_counts(self) -> dict[str, int]:
-        """Cards the proposer hands over, per resource."""
+        """Cards the proposer hands over, per resource. Computed once."""
         return dict(Counter(self.give))
 
-    @property
+    @cached_property
     def want_counts(self) -> dict[str, int]:
-        """Cards the proposer receives, per resource."""
+        """Cards the proposer receives, per resource. Computed once."""
         return dict(Counter(self.want))
 
 
@@ -217,11 +218,35 @@ class TradeProtocol:
         )
         self.negotiation: TradeNegotiation | None = None
         self.history: list[TradeRecord] = []
+        self._offers_by_give = self._group_by_give_side(self.catalog)
+        self._offers_per_turn: Counter[int] = Counter()
 
     def reset(self) -> None:
         """Forget the open negotiation and the history, for a new game."""
         self.negotiation = None
         self.history = []
+        self._offers_per_turn = Counter()
+
+    @staticmethod
+    def _group_by_give_side(
+        catalog: Iterable[TradeOffer],
+    ) -> dict[tuple[str, ...], list[TradeOffer]]:
+        """Group offers by what the proposer gives.
+
+        Only 20 distinct give sides exist at two cards per side, so checking
+        a hand against each side once is far cheaper than checking every
+        offer.
+
+        Args:
+            catalog: Offers to group, in catalog order.
+
+        Returns:
+            Offers per give side, each list in catalog order.
+        """
+        groups: defaultdict[tuple[str, ...], list[TradeOffer]] = defaultdict(list)
+        for offer in catalog:
+            groups[offer.give].append(offer)
+        return dict(groups)
 
     def offers_made_this_turn(self, state: State) -> int:
         """Count the offers made so far in the current turn.
@@ -232,8 +257,7 @@ class TradeProtocol:
         Returns:
             Closed and open offers made this turn.
         """
-        closed = sum(1 for record in self.history if record.turn == state.num_turns)
-        return closed + (self.negotiation is not None)
+        return self._offers_per_turn[state.num_turns]
 
     def can_propose(self, state: State, color: Color) -> bool:
         """Judge whether a player may make an offer right now.
@@ -264,13 +288,19 @@ class TradeProtocol:
             color: Colour of the would-be proposer.
 
         Returns:
-            Catalog offers whose cards the player holds; empty if it may not
-            propose at all.
+            Catalog offers whose cards the player holds, in catalog order;
+            empty if it may not propose at all.
         """
         if not self.can_propose(state, color):
             return []
         hand = hand_counts(state, color)
-        return [offer for offer in self.catalog if self._holds(hand, offer.give_counts)]
+        affordable = {
+            offer
+            for give, offers in self._offers_by_give.items()
+            if self._holds(hand, offers[0].give_counts)
+            for offer in offers
+        }
+        return [offer for offer in self.catalog if offer in affordable]
 
     def can_pay(self, state: State, color: Color, offer: TradeOffer) -> bool:
         """Judge whether a responder holds the cards an offer asks for.
@@ -318,6 +348,7 @@ class TradeProtocol:
             order[(start + i) % len(order)] for i in range(1, len(order))
         )
         self.negotiation = TradeNegotiation(state.num_turns, color, offer, responders)
+        self._offers_per_turn[state.num_turns] += 1
         self._advance(state)
 
     def respond(self, state: State, color: Color, accept: bool) -> None:
