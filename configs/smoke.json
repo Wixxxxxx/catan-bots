@@ -1,0 +1,39 @@
+{
+  "run_name": "smoke",
+  "output_dir": "runs",
+  "seed": 0,
+  "total_steps": 8192,
+  "num_workers": 2,
+  "steps_per_iteration": 2048,
+  "num_players": 4,
+  "trading": true,
+  "turn_limit": 300,
+  "hidden_sizes": [
+    256,
+    256
+  ],
+  "learning_rate": 0.00025,
+  "gamma": 0.999,
+  "gae_lambda": 0.95,
+  "clip_coef": 0.2,
+  "entropy_coef": 0.01,
+  "value_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "update_epochs": 2,
+  "minibatch_size": 512,
+  "vp_shaping": 0.0,
+  "self_play_fraction": 0.8,
+  "baseline_seat_fraction": 0.25,
+  "baselines": [
+    "greedy_trader",
+    "greedy_settler"
+  ],
+  "snapshot_every": 1,
+  "max_snapshots": 20,
+  "checkpoint_every": 1,
+  "eval_every": 2,
+  "eval_games": 8,
+  "eval_opponents": [
+    "random"
+  ]
+}

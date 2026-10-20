@@ -94,9 +94,7 @@ class CatanEnv(gym.Env):
         self._init_state()
         return self._build_observation(), self._build_info()
 
-    def step(
-        self, action: int
-    ) -> tuple[Any, float, bool, bool, dict[str, Any]]:
+    def step(self, action: int) -> tuple[Any, float, bool, bool, dict[str, Any]]:
         """Apply one action and advance the game.
 
         Args:
