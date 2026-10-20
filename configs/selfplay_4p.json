@@ -21,7 +21,7 @@
   "max_grad_norm": 0.5,
   "update_epochs": 4,
   "minibatch_size": 4096,
-  "vp_shaping": 0.0,
+  "vp_shaping": 1.0,
   "self_play_fraction": 0.8,
   "baseline_seat_fraction": 0.25,
   "baselines": [
