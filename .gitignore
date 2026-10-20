@@ -13,3 +13,6 @@ build/
 
 # OS
 .DS_Store
+
+# Training runs (checkpoints, logs, TensorBoard)
+runs/

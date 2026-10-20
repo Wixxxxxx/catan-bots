@@ -18,6 +18,45 @@ Production code lives in [src/catan_bots/](src/catan_bots/);
 [notebooks/playground.ipynb](notebooks/playground.ipynb) is research only and
 imports those modules.
 
+## Training
+
+Self-play PPO: one shared network plays every learner seat, each seat's moves
+are kept as their own trajectory, and past snapshots plus baseline bots fill
+some seats. Everything runs from one command line:
+
+```bash
+uv run python -m catan_bots.training train --config configs/selfplay_4p.json
+uv run python -m catan_bots.training resume runs/<run-directory>
+uv run python -m catan_bots.training evaluate runs/<run-directory>/checkpoints/latest.pt
+uv run python -m catan_bots.training benchmark
+```
+
+Change any setting without editing the file with `--set`, for example
+`--set total_steps=50000000 num_workers=8`. A run writes everything to
+`runs/<run_name>-<timestamp>/`: its config, the git commit it ran on,
+checkpoints, league snapshots, `metrics.jsonl`, `eval.jsonl` and TensorBoard
+logs. Watch it with `uv run tensorboard --logdir runs`.
+
+### On a Mac mini
+
+The default settings are sized for a 10-core Apple Silicon Mac mini with
+16 GB of RAM: `configs/selfplay_4p.json` uses 8 worker processes, leaving two
+cores for the learner and the system. Each worker needs a few hundred MB.
+
+1. Install [uv](https://docs.astral.sh/uv/) (`brew install uv`), then clone
+   the repository and run `uv sync` in it.
+2. Measure the machine once: `uv run python -m catan_bots.training benchmark`.
+   It prints decisions per second for one worker and for all of them.
+3. Start training, keeping the Mac awake for the whole run:
+
+   ```bash
+   caffeinate -is uv run python -m catan_bots.training train --config configs/selfplay_4p.json
+   ```
+
+4. If the run stops for any reason, continue it from its last checkpoint with
+   `resume`; nothing before that checkpoint is lost. Pass
+   `--set total_steps=...` to train past the original budget.
+
 ## Project log
 
 ### 2026-10-08 — Player-to-player trading

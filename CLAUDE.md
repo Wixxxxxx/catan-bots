@@ -100,7 +100,9 @@ catan-bots/
 │   ├── rules/           # rules catanatron leaves unmodelled
 │   ├── observation/     # redacted per-seat views (no hidden information)
 │   ├── envs/            # PettingZoo AEC environment, action table, encoder
+│   ├── training/        # self-play PPO: policy, rollouts, league, trainer, CLI
 │   └── analytics/       # reports, board stats, tournaments
+├── configs/             # training run configurations (JSON)
 ├── notebooks/           # research notebooks (no production code)
 ├── tests/               # pytest suites
 └── .claude/

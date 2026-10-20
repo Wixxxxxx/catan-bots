@@ -314,6 +314,32 @@ class CatanAECEnv(AECEnv):
     def close(self) -> None:
         """Release resources; the environment holds none."""
 
+    @property
+    def trades(self) -> TradeProtocol | None:
+        """The game's trading protocol, or `None` when trading is off."""
+        return self._trading
+
+    @property
+    def pending_discard(self) -> SequentialDiscard | None:
+        """The discard being chosen card by card right now, if any."""
+        return self._pending_discard
+
+    @property
+    def legal_indices(self) -> frozenset[int]:
+        """Action indices legal for the deciding agent right now."""
+        return self._legal_indices
+
+    def legal_engine_actions(self) -> dict[int, Action]:
+        """Map each legal engine-action index to its catanatron `Action`.
+
+        Discard picks and trade actions are not engine actions and are not
+        included.
+
+        Returns:
+            A copy of the index-to-action mapping for the current decision.
+        """
+        return dict(self._legal_actions)
+
     def color_of(self, agent: str) -> Color:
         """Look up the colour an agent plays.
 
