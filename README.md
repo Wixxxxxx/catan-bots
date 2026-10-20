@@ -82,8 +82,8 @@ PettingZoo's SB3 bridge, which merges all seats into one stream. 80% of games
 are pure self-play; the rest put past snapshots or baseline bots in one to
 three seats. Checkpoints are atomic and runs resume.
 
-**First learning check** (this repo's 4-core dev machine, about 45 minutes,
-VP shaping on). Evaluation puts the policy in one seat against three copies of
+**First learning check** (this repo's 4-core dev machine, 14 minutes of wall
+clock including evaluations, about 16 seconds per iteration, VP shaping on). Evaluation puts the policy in one seat against three copies of
 a baseline; chance is 25%.
 
 | Iteration | Decisions | vs random | vs `GreedySettler` |
