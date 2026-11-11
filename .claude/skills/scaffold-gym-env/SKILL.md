@@ -8,6 +8,11 @@ description: Scaffold a new Gymnasium (OpenAI Gym successor) environment for Cat
 This skill creates a new Gymnasium environment that conforms to
 [CLAUDE.md](../../../CLAUDE.md) and is ready for RL training.
 
+> **Superseded for the main game.** The repo already has a PettingZoo AEC
+> environment, `CatanAECEnv`, in
+> [src/catan_bots/envs/](../../../src/catan_bots/envs/); extend that for 2–4
+> player Catan. Use this template only for a separate single-agent variant.
+
 ## When to use
 
 - Starting a brand-new Catan environment.

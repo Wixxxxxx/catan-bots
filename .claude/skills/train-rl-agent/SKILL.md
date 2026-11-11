@@ -8,6 +8,12 @@ description: Scaffold a reproducible reinforcement-learning training run for a C
 This skill creates a reproducible training + evaluation run that conforms to
 [CLAUDE.md](../../../CLAUDE.md).
 
+> **Superseded for the main game.** The repo already has a self-play PPO trainer
+> in [src/catan_bots/training/](../../../src/catan_bots/training/). For a new
+> experiment, add a file in [configs/](../../../configs/) and run
+> `uv run python -m catan_bots.training train --config <file>`. Use this
+> MaskablePPO template only for a separate single-agent experiment.
+
 ## When to use
 
 - Setting up training for the Catan env for the first time.

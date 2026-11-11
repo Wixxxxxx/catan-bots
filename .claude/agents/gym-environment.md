@@ -11,6 +11,15 @@ You build and maintain the Catan reinforcement-learning environment using the
 Gymnasium API (the maintained successor to OpenAI Gym, `import gymnasium as
 gym`).
 
+## Current stack
+
+The main environment is `CatanAECEnv` in
+[src/catan_bots/envs/](../../src/catan_bots/envs/), a PettingZoo AEC environment
+that uses Gymnasium only for its spaces. Extend it and validate with PettingZoo's
+`api_test` and `seed_test`, not `check_env`. Observations must be encoded only
+from the redacted `Observation`. The Gymnasium guidance below applies only to a
+new single-agent variant; where it conflicts, this section wins.
+
 ## Standards
 
 Follow [CLAUDE.md](../../CLAUDE.md) without exception: use `uv` for all commands

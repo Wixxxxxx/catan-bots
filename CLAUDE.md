@@ -1,7 +1,7 @@
 # catan-bots
 
-Reinforcement-learning bots for the game of Catan: a Gymnasium environment, RL
-training pipelines, gameplay analytics, and dashboards.
+Reinforcement-learning bots for the game of Catan: a PettingZoo multi-agent
+environment, self-play PPO training, and gameplay analytics.
 
 This file is the source of truth for how code is written in this repo. Every
 agent and contributor must follow it. Specialized agents live in

@@ -1,9 +1,11 @@
 # catan-bots
 
-Reinforcement-learning bots for the game of Catan: a Gymnasium environment, RL
-training pipelines, gameplay analytics, and dashboards.
+Reinforcement-learning bots for the game of Catan: a PettingZoo multi-agent
+environment, self-play PPO training, and gameplay analytics.
 
-See [CLAUDE.md](CLAUDE.md) for coding standards and project layout.
+See [CLAUDE.md](CLAUDE.md) for coding standards and project layout. The newest
+entry in the [project log](#project-log) has the current status; dashboards are
+not built yet.
 
 ## Getting started
 
@@ -37,6 +39,23 @@ Change any setting without editing the file with `--set`, for example
 checkpoints, league snapshots, `metrics.jsonl`, `eval.jsonl` and TensorBoard
 logs. Watch it with `uv run tensorboard --logdir runs`.
 
+### Who sits at the table
+
+[src/catan_bots/training/league.py](src/catan_bots/training/league.py) draws the
+seating at the start of each game; seats do not change during a game. These are
+the settings in `configs/selfplay_4p.json`:
+
+- **Snapshots.** Every 10 iterations the policy is saved to the run's `league/`
+  directory. The newest 20 are kept. These are separate from the resume
+  checkpoints, which are written every 5 iterations.
+- **Lineups.** 80% of games put the current policy in every seat. The rest
+  replace one to three seats, always leaving at least one learner.
+- **Replaced seats.** Each goes to a baseline bot with 25% probability, otherwise
+  to a snapshot picked uniformly. Until the first snapshot exists, every replaced
+  seat goes to a baseline.
+- **Learning.** Only learner seats produce training data; snapshots and baselines
+  are fixed opponents.
+
 ### On a Mac mini
 
 The default settings are sized for a 10-core Apple Silicon Mac mini with
@@ -58,6 +77,50 @@ cores for the learner and the system. Each worker needs a few hundred MB.
    `--set total_steps=...` to train past the original budget.
 
 ## Project log
+
+### 2026-11-08 — Status review and documentation sync
+
+**Status:** Documentation only; no code changed. The environment, trading,
+redacted observations and self-play trainer are in place. The only recorded
+training is the 14-minute check below (about 919k decisions of a planned 20M),
+which has not clearly beaten a table of `GreedyTrader` bots. Older entries in
+this log are kept as written, so their references to Gymnasium and MaskablePPO
+describe plans at the time.
+
+**Roadmap** (the numbering approved on 2026-10-08):
+
+| Step | Item | State |
+|---|---|---|
+| 1 | Redacted per-seat observations | Done |
+| 2 | PettingZoo AEC environment | Done |
+| 3 | Strong non-RL baselines (value function, depth-2 alpha-beta) | Not started |
+| 4 | Self-play training with league play | Built; long run not recorded |
+| 5 | Player-to-player trading | First phase done; counter-offers planned |
+| 6 | Rules fidelity (dev-card timing, turn-limit truncation) | Done |
+
+Step 4 changed from the plan: training uses this repo's own PPO rather than
+MaskablePPO, because each seat needs its own trajectory.
+
+**Known gaps:**
+
+- **Baselines can see hidden information.** `BotAgent` hands bots the full game.
+  The greedy bots were not found reading opponents' hands, but a search-based
+  baseline (step 3) must be restricted or it will play with knowledge the
+  learner lacks.
+- **Encoded-vector test coverage.** Only opponents' hand types are tested on the
+  encoded vector. Development cards, VP cards and deck order are tested on the
+  redacted view the encoder is built from.
+- **No memory.** The policy sees snapshots with no action history, so it cannot
+  count cards as a human can. This limits strength but leaks nothing.
+- **Snapshot window.** The 20 kept snapshots cover the last 200 iterations of
+  about 610 in a full run, so the oldest opponents leave the pool.
+- **Unused dependencies.** `stable-baselines3` and `sb3-contrib` are not imported
+  by the package, tests or notebook.
+- **Stub.** `main.py` only prints a greeting; the real entry point is
+  `python -m catan_bots.training`.
+
+**Next:** run the full 20M-step training on the Mac mini, aiming to beat a table
+of `GreedyTrader` bots, then build the stronger baselines (step 3).
 
 ### 2026-10-20 — Self-play trainer, and a first run that learns
 
@@ -83,8 +146,9 @@ are pure self-play; the rest put past snapshots or baseline bots in one to
 three seats. Checkpoints are atomic and runs resume.
 
 **First learning check** (this repo's 4-core dev machine, 14 minutes of wall
-clock including evaluations, about 16 seconds per iteration, VP shaping on). Evaluation puts the policy in one seat against three copies of
-a baseline; chance is 25%.
+clock including evaluations, about 16 seconds per iteration, VP shaping on).
+Evaluation puts the policy in one seat against three copies of a baseline;
+chance is 25%.
 
 | Iteration | Decisions | vs random | vs `GreedySettler` |
 |---|---|---|---|

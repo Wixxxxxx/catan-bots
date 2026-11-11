@@ -1,7 +1,7 @@
 [project]
 name = "catan-bots"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reinforcement-learning bots for the game of Catan"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
