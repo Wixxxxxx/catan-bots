@@ -1,0 +1,45 @@
+{
+  "run_name": "selfplay-4p-m5pro",
+  "output_dir": "runs",
+  "seed": 0,
+  "total_steps": 1000000000,
+  "num_workers": 14,
+  "steps_per_iteration": 65536,
+  "num_players": 4,
+  "trading": true,
+  "turn_limit": 1000,
+  "hidden_sizes": [
+    256,
+    256
+  ],
+  "learning_rate": 0.00025,
+  "final_learning_rate_fraction": 0.1,
+  "target_kl": 0.02,
+  "gamma": 0.999,
+  "gae_lambda": 0.95,
+  "clip_coef": 0.2,
+  "entropy_coef": 0.01,
+  "value_coef": 0.5,
+  "max_grad_norm": 0.5,
+  "update_epochs": 4,
+  "minibatch_size": 8192,
+  "vp_shaping": 1.0,
+  "self_play_fraction": 0.8,
+  "baseline_seat_fraction": 0.25,
+  "baselines": [
+    "greedy_trader",
+    "greedy_settler"
+  ],
+  "snapshot_every": 50,
+  "max_snapshots": 50,
+  "checkpoint_every": 25,
+  "eval_every": 100,
+  "eval_games": 200,
+  "eval_opponents": [
+    "random",
+    "greedy_settler",
+    "greedy_trader"
+  ],
+  "eval_references": [],
+  "eval_oldest_snapshot": true
+}

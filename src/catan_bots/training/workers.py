@@ -21,10 +21,10 @@ import torch
 
 from catan_bots.envs import CatanAECEnv
 from catan_bots.rules.trading import DEFAULT_TRADING_RULES
-from catan_bots.training.agents import PolicyAgent, make_baseline
+from catan_bots.training.agents import PolicyAgent
+from catan_bots.training.architectures import build_policy
 from catan_bots.training.config import TrainingConfig
-from catan_bots.training.league import LineupSampler, OpponentFactory
-from catan_bots.training.policy import ActorCritic
+from catan_bots.training.league import LineupSampler, OpponentFactory, opponent_plan
 from catan_bots.training.rollout import RolloutBatch, RolloutCollector, RolloutStats
 
 
@@ -47,11 +47,12 @@ class CollectTask:
 
 @dataclass(frozen=True)
 class EvaluateTask:
-    """Ask a worker for evaluation games against one baseline.
+    """Ask a worker for evaluation games against one opponent.
 
     Attributes:
         weights: Policy snapshot to evaluate.
-        opponent: Baseline filling every other seat.
+        opponent: Fills every other seat: a baseline name, or the path of a
+            policy file (league snapshot or checkpoint).
         games: Games to play.
         first_game: Index of the first game, so seats rotate across tasks.
         seed: Seed for game seeds and sampling.
@@ -87,7 +88,10 @@ class WorkerState:
     Attributes:
         config: The run's configuration.
         env: The worker's environment.
-        policy: A policy whose weights are replaced for every task.
+        policy: A policy of the run's architecture whose weights are
+            replaced for every task.
+        opponents: Builds snapshot and baseline opponents, caching snapshots
+            for both training and evaluation games.
         collector: Plays and records training games.
     """
 
@@ -99,13 +103,14 @@ class WorkerState:
         """
         self.config = config
         self.env = make_env(config)
-        self.policy = ActorCritic(
-            self.env.encoder.size, self.env.table.size, config.hidden_sizes
-        ).eval()
+        self.policy = build_policy(config, self.env)
+        self.opponents = OpponentFactory(
+            max_cached=config.max_snapshots + len(config.eval_references) + 1
+        )
         self.collector = RolloutCollector(
             self.env,
             self.policy,
-            OpponentFactory(max_cached=config.max_snapshots),
+            self.opponents,
             config.gamma,
             config.gae_lambda,
             config.vp_shaping,
@@ -193,7 +198,7 @@ def collect(task: CollectTask) -> tuple[RolloutBatch, RolloutStats]:
 
 
 def evaluate(task: EvaluateTask) -> EvaluateTally:
-    """Play evaluation games: the policy in one seat, a baseline in the rest.
+    """Play evaluation games: the policy in one seat, the opponent in the rest.
 
     The policy's seat rotates with the game index; catanatron also shuffles
     the seating order every game, so no seat position is favoured.
@@ -212,15 +217,14 @@ def evaluate(task: EvaluateTask) -> EvaluateTally:
     wins = truncated = 0
     for game in range(task.first_game, task.first_game + task.games):
         policy_agent = env.possible_agents[game % len(env.possible_agents)]
-        winner = _play_evaluation_game(env, state.policy, task, policy_agent, rng)
+        winner = _play_evaluation_game(state, task, policy_agent, rng)
         wins += winner == policy_agent
         truncated += winner is None
     return EvaluateTally(task.games, wins, truncated)
 
 
 def _play_evaluation_game(
-    env: CatanAECEnv,
-    policy: ActorCritic,
+    state: WorkerState,
     task: EvaluateTask,
     policy_agent: str,
     rng: np.random.Generator,
@@ -228,8 +232,8 @@ def _play_evaluation_game(
     """Play one evaluation game.
 
     Args:
-        env: The worker's environment.
-        policy: The policy under evaluation.
+        state: The worker's environment, policy under evaluation and
+            opponent factory.
         task: The evaluation task.
         policy_agent: The seat the policy plays.
         rng: Draws the game seed.
@@ -237,11 +241,13 @@ def _play_evaluation_game(
     Returns:
         The winning agent's name, or `None` if the game was truncated.
     """
+    env = state.env
     env.reset(seed=int(rng.integers(1 << 31)))
+    plan = opponent_plan(task.opponent)
     seats = {
-        agent: PolicyAgent(policy, task.deterministic)
+        agent: PolicyAgent(state.policy, task.deterministic)
         if agent == policy_agent
-        else make_baseline(task.opponent)
+        else state.opponents.build(plan)
         for agent in env.possible_agents
     }
     for agent in env.agent_iter():

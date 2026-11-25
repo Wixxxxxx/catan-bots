@@ -8,6 +8,7 @@ import torch
 
 from catan_bots.training.__main__ import load_weights, parse_overrides, run_config_for
 from catan_bots.training.config import TrainingConfig
+from catan_bots.training.graph_policy import GraphActorCritic
 from catan_bots.training.trainer import Trainer
 
 
@@ -146,6 +147,75 @@ def test_parse_overrides_reads_json_values() -> None:
     }
     with pytest.raises(ValueError):
         parse_overrides(["no-equals-sign"])
+
+
+def test_run_evaluates_against_references_and_its_past(
+    finished_run: Path, tmp_path: Path
+) -> None:
+    """References and the oldest snapshot are evaluated under stable labels."""
+    reference = finished_run / "checkpoints" / "latest.pt"
+    config = tiny_config(
+        tmp_path,
+        eval_references=(str(reference),),
+        eval_oldest_snapshot=True,
+        final_learning_rate_fraction=0.1,
+        target_kl=0.02,
+    )
+    trainer = Trainer.create(config)
+    trainer.train()
+    evaluations = read_jsonl(trainer.run_dir / "eval.jsonl")
+    labels = {e["opponent"] for e in evaluations}
+    assert {"random", "reference_0", "league_oldest"} <= labels
+    assert all(
+        e["spec"] == str(reference)
+        for e in evaluations
+        if e["opponent"] == "reference_0"
+    )
+    metrics = read_jsonl(trainer.run_dir / "metrics.jsonl")
+    steps_before = [0] + [m["step"] for m in metrics[:-1]]
+    for record, step in zip(metrics, steps_before):
+        assert record["learning_rate"] == pytest.approx(config.learning_rate_at(step))
+
+
+def test_missing_reference_fails_before_creating_a_run(tmp_path: Path) -> None:
+    """A mistyped reference path stops the run before anything is written."""
+    config = tiny_config(tmp_path / "runs", eval_references=("missing.pt",))
+    with pytest.raises(FileNotFoundError, match="missing.pt"):
+        Trainer.create(config)
+    assert not (tmp_path / "runs").exists()
+
+
+def test_graph_run_trains_resumes_and_plays_mlp_references(
+    finished_run: Path, tmp_path: Path
+) -> None:
+    """A graph-network run trains (on the GPU if there is one), resumes and keeps
+    training, and evaluates against an MLP checkpoint."""
+    reference = finished_run / "checkpoints" / "latest.pt"
+    config = tiny_config(
+        tmp_path,
+        architecture="graph",
+        graph_width=16,
+        graph_rounds=1,
+        update_device="auto",
+        eval_references=(str(reference),),
+        eval_oldest_snapshot=True,
+    )
+    trainer = Trainer.create(config)
+    trainer.train()
+    assert isinstance(trainer.policy, GraphActorCritic)
+    assert load_weights(trainer.checkpoint_path)["architecture"] == "graph"
+    snapshot = next((trainer.run_dir / "league").glob("snapshot_*.pt"))
+    assert load_weights(snapshot)["architecture"] == "graph"
+    labels = {e["opponent"] for e in read_jsonl(trainer.run_dir / "eval.jsonl")}
+    assert {"reference_0", "league_oldest"} <= labels
+    resumed = Trainer.resume(
+        trainer.run_dir, {"total_steps": trainer.global_step + 300}
+    )
+    assert isinstance(resumed.policy, GraphActorCritic)
+    for name, tensor in resumed.policy.state_dict().items():
+        torch.testing.assert_close(tensor, trainer.policy.state_dict()[name])
+    resumed.train()
+    assert resumed.iteration > trainer.iteration
 
 
 def test_checkpoints_and_snapshots_both_load(finished_run: Path) -> None:

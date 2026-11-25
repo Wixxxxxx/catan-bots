@@ -3,9 +3,10 @@
 Reinforcement-learning bots for the game of Catan: a PettingZoo multi-agent
 environment, self-play PPO training, and gameplay analytics.
 
-See [CLAUDE.md](CLAUDE.md) for coding standards and project layout. The newest
-entry in the [project log](#project-log) has the current status; dashboards are
-not built yet.
+See [CLAUDE.md](CLAUDE.md) for coding standards and project layout, and
+[PROJECT_STATUS.md](PROJECT_STATUS.md) for the current status, latest metrics
+and next steps. The [project log](#project-log) keeps the history; dashboards
+are not built yet.
 
 ## Getting started
 
@@ -27,7 +28,7 @@ are kept as their own trajectory, and past snapshots plus baseline bots fill
 some seats. Everything runs from one command line:
 
 ```bash
-uv run python -m catan_bots.training train --config configs/selfplay_4p.json
+uv run python -m catan_bots.training train --config configs/selfplay_4p_m5pro.json
 uv run python -m catan_bots.training resume runs/<run-directory>
 uv run python -m catan_bots.training evaluate runs/<run-directory>/checkpoints/latest.pt
 uv run python -m catan_bots.training benchmark
@@ -39,15 +40,68 @@ Change any setting without editing the file with `--set`, for example
 checkpoints, league snapshots, `metrics.jsonl`, `eval.jsonl` and TensorBoard
 logs. Watch it with `uv run tensorboard --logdir runs`.
 
+There is one configuration per machine:
+
+| Config | Machine | Workers | Budget |
+|---|---|---|---|
+| `configs/selfplay_4p_m5pro.json` | 18-core M5 Pro laptop, 24 GB | 14 | 1B decisions, about 10 hours |
+| `configs/selfplay_4p_m5pro_graph.json` | The same, graph network, updates on the GPU | 14 | 1B decisions; see [Policy networks](#policy-networks) for speed |
+| `configs/selfplay_4p.json` | 10-core Mac mini, 16 GB | 8 | 20M decisions |
+| `configs/smoke.json` | Any; checks the pipeline in seconds | 2 | 8k decisions |
+
+### Policy networks
+
+`architecture` picks the network; everything else (masking, sampling, PPO,
+the league, evaluation) is shared. Both read the same 1,413-number
+observation and output the same 587 action scores.
+
+- **`"mlp"`** (default):
+  [MlpActorCritic](src/catan_bots/training/policy.py). The observation is one
+  flat vector through two 256-wide layers; 579k parameters. Every input number
+  has its own weights, so what it learns about one intersection does not
+  carry over to another.
+- **`"graph"`**:
+  [GraphActorCritic](src/catan_bots/training/graph_policy.py). The board
+  blocks are read as rows (54 intersections, 72 road slots, 19 hexes) and
+  passed through `graph_rounds` rounds of message passing over the board's
+  adjacency ([board_graph.py](src/catan_bots/envs/board_graph.py)). One set of
+  weights is shared by every row of a kind, so a lesson learned at one
+  intersection applies to all of them. Settlement and city scores come from
+  each intersection's vector, road scores from each road slot's, robber
+  scores from each hex's, and everything else from a pooled summary.
+  417k parameters at `graph_width` 64 and 3 rounds.
+
+Snapshots record their architecture, so a graph run can evaluate against, or
+draw league opponents from, MLP checkpoints and the other way round. Old
+snapshots without the field load as MLPs.
+
+The graph network costs more per decision. Measured on the M5 Pro:
+
+| | MLP | Graph (64 wide, 3 rounds) |
+|---|---|---|
+| One move, one CPU thread | 0.06 ms | 0.42 ms |
+| Collecting, 14 workers | 37.9k decisions/s | 10.1k decisions/s |
+| One PPO update (65k decisions × 4 epochs), CPU | about 1 s | about 37 s |
+| The same update on the Apple GPU (`update_device`) | about 0.4 s | about 19 s |
+| Training including updates | about 27k decisions/s | about 3.3k decisions/s |
+
+The update is limited by memory traffic over 54 to 72 rows per decision, not
+by CPU threads (6 and 18 threads take the same time), so the graph config
+runs updates on the GPU with `"update_device": "mps"`. Games are always
+played on CPU workers; the network moves to the GPU for each update and back.
+Checkpoints always store CPU tensors, so a run resumes on any machine.
+
 ### Who sits at the table
 
 [src/catan_bots/training/league.py](src/catan_bots/training/league.py) draws the
-seating at the start of each game; seats do not change during a game. These are
-the settings in `configs/selfplay_4p.json`:
+seating at the start of each game; seats do not change during a game. The
+numbers below are from `configs/selfplay_4p_m5pro.json`.
 
-- **Snapshots.** Every 10 iterations the policy is saved to the run's `league/`
-  directory. The newest 20 are kept. These are separate from the resume
-  checkpoints, which are written every 5 iterations.
+- **Snapshots.** Every 50 iterations the policy is saved to the run's `league/`
+  directory. The newest 50 are kept, covering roughly the last 200M decisions.
+  These are separate from the resume checkpoints, written every 25 iterations.
+  Both are saved under a temporary name and renamed into place, so an
+  interrupted save never leaves a corrupt file.
 - **Lineups.** 80% of games put the current policy in every seat. The rest
   replace one to three seats, always leaving at least one learner.
 - **Replaced seats.** Each goes to a baseline bot with 25% probability, otherwise
@@ -56,11 +110,64 @@ the settings in `configs/selfplay_4p.json`:
 - **Learning.** Only learner seats produce training data; snapshots and baselines
   are fixed opponents.
 
+### Evaluation
+
+Every `eval_every` iterations (100, about every 5 minutes on the M5 Pro) and
+once at the end, training pauses and the current policy plays `eval_games`
+games in one seat against three copies of each opponent; chance is 25%. Each
+result goes to `eval.jsonl` and TensorBoard as `eval/win_rate_vs_<label>`.
+
+- **Baselines** (`eval_opponents`): random, `GreedySettler`, `GreedyTrader`.
+  These stop being informative once the policy beats them.
+- **Its own past** (`eval_oldest_snapshot`, label `league_oldest`): the oldest
+  snapshot still in the league. Well above 25% means it still beats where it
+  was a few hours earlier; a slide towards 25% means it has plateaued, and below
+  25% means it has forgotten something.
+- **Fixed references** (`eval_references`, labels `reference_0`, ...): policy
+  files that never change, usually the final checkpoint of an earlier run. They
+  give a bar that stays put across runs. A missing file stops the run before it
+  starts.
+
+`evaluate --opponents` also accepts policy files, so two checkpoints can be
+compared directly:
+
+```bash
+uv run python -m catan_bots.training evaluate new/latest.pt --opponents old/latest.pt
+```
+
+### Learning-rate schedule and KL limit
+
+- **`final_learning_rate_fraction`** (0.1 on the M5 Pro): the learning rate falls
+  linearly from `learning_rate` to this share of it at `total_steps`. Large steps
+  help early; late in a run they mostly add noise to a policy that is already
+  good. 1.0 keeps the rate constant.
+- **`target_kl`** (0.02): KL divergence measures how far the updated policy's
+  action probabilities have moved from the policy that played the games. PPO's
+  clipping stops rewarding big moves but does not prevent them across several
+  epochs. Before each minibatch step the trainer measures this divergence and,
+  if it exceeds 1.5 × `target_kl`, ends the update for that batch. It is a
+  safety net against a single bad update wrecking the policy, and it should
+  rarely fire; `train/kl_stopped` records when it does. 0 disables it.
+
+### On an M5 Pro laptop
+
+`configs/selfplay_4p_m5pro.json` uses 14 workers. Measured with `benchmark`,
+14 and 16 workers give nearly the same throughput (43.8k vs 44.9k decisions/s
+collecting), so 14 leaves cores for the PPO update and the laptop itself.
+Training including updates runs at about 27k decisions/s.
+
+Keep the laptop plugged in with the lid open, and keep it awake:
+
+```bash
+caffeinate -is uv run python -m catan_bots.training train --config configs/selfplay_4p_m5pro.json
+```
+
 ### On a Mac mini
 
-The default settings are sized for a 10-core Apple Silicon Mac mini with
-16 GB of RAM: `configs/selfplay_4p.json` uses 8 worker processes, leaving two
-cores for the learner and the system. Each worker needs a few hundred MB.
+`configs/selfplay_4p.json` is sized for a 10-core Apple Silicon Mac mini with
+16 GB of RAM: 8 worker processes, leaving two cores for the learner and the
+system. Each worker needs a few hundred MB. It predates the learning-rate
+schedule, KL limit and extra evaluations, which are off unless set.
 
 1. Install [uv](https://docs.astral.sh/uv/) (`brew install uv`), then clone
    the repository and run `uv sync` in it.
@@ -77,6 +184,104 @@ cores for the learner and the system. Each worker needs a few hundred MB.
    `--set total_steps=...` to train past the original budget.
 
 ## Project log
+
+### 2026-11-24 — Graph-network policy
+
+**Status:** A second policy network, `architecture: "graph"`, is in place and
+tested end to end, alongside the MLP. It trains about 8× slower per decision
+on the M5 Pro, and in its first 1.6M decisions it learned more slowly than the
+MLP did. Next: the user picks the network for the medium run. Current status
+now lives in [PROJECT_STATUS.md](PROJECT_STATUS.md), which every session
+updates.
+
+**What changed:**
+
+- **Graph network** ([graph_policy.py](src/catan_bots/training/graph_policy.py),
+  [board_graph.py](src/catan_bots/envs/board_graph.py)): message passing over
+  the board's intersections, road slots and hexes, with shared weights per
+  kind and per-row action heads. See [Policy networks](#policy-networks).
+- **One interface, two networks.** `ActorCritic` is now an abstract base;
+  `MlpActorCritic` is the old network unchanged. `build_policy` builds the
+  configured one and `policy_from_snapshot` rebuilds any snapshot, so runs
+  can mix architectures in the league and in evaluation.
+- **`update_device`.** PPO updates can run on the Apple GPU; games stay on CPU
+  workers. Checkpoints store CPU tensors.
+- **Benchmark flag.** `benchmark --set architecture=graph` measures either
+  network.
+- **Status log.** [PROJECT_STATUS.md](PROJECT_STATUS.md) holds the current
+  status, metrics, assumptions and next steps. [CLAUDE.md](CLAUDE.md) requires
+  every session to read it first and update it, and a `Stop` hook in
+  [.claude/settings.json](.claude/settings.json) blocks the end of a turn while
+  changed files are newer than it.
+
+**Check run** (`selfplay_4p_m5pro_graph.json`, 1.65M decisions, 20
+iterations, 9 minutes, learning rate decayed over those 1.65M). Compared with
+the MLP check run of 2026-11-11 at the same number of decisions, 200 games
+each:
+
+| Network, decisions | vs random | vs `GreedySettler` | vs `GreedyTrader` | vs oldest snapshot |
+|---|---|---|---|---|
+| MLP, 1.63M | 87.0% [81.6, 91.0] | 45.5% [38.7, 52.4] | 18.0% [13.3, 23.9] | 73.5% [67.0, 79.1] |
+| Graph, 1.65M | 77.0% [70.7, 82.3] | 29.5% [23.6, 36.2] | 11.5% [7.8, 16.7] | 71.5% [64.9, 77.3] |
+
+- **Not ahead yet.** The graph network trails on every baseline at this
+  point. One seed and a short run settle nothing, and the two runs' learning
+  rates decayed over different budgets, but the hoped-for sample efficiency
+  did not show in the first 1.6M decisions.
+- **Throughput.** 6.5 s collecting and 18.7 s updating on the GPU per
+  65k-decision iteration, about 3.3k decisions/s against the MLP's 27k. The
+  update dominates.
+- **KL.** The largest KL was 0.005 and the limit never fired, so as with the
+  MLP the learning rate has room to rise.
+
+### 2026-11-11 — Ready for a long run on the M5 Pro
+
+**Status:** The trainer is prepared for runs of hundreds of millions of
+decisions. Next: a medium run of about 2 hours to see where the policy
+plateaus, then the 1B-decision run with that run's final checkpoint as a fixed
+reference.
+
+**What changed:**
+
+- **Atomic snapshots.** League snapshots are written to a temporary file and
+  renamed, like checkpoints. Leftover partial files are deleted when a league
+  is opened. Before, a crash mid-save left a corrupt snapshot that a resumed
+  run would load and fail on.
+- **M5 Pro config** (`configs/selfplay_4p_m5pro.json`): 14 workers, 64k
+  decisions per iteration, and snapshot, checkpoint and evaluation intervals
+  scaled for a 1B-decision budget.
+- **Evaluation that does not saturate.** Evaluations can include fixed
+  reference policies and the oldest league snapshot (see
+  [Evaluation](#evaluation)).
+- **Learning-rate decay and a KL limit** (see
+  [Learning-rate schedule and KL limit](#learning-rate-schedule-and-kl-limit)).
+- **Dependencies.** Removed `stable-baselines3` and `sb3-contrib`, which nothing
+  imported. The masked PPO is this repo's own: illegal actions' logits are set
+  to -1e9 in [policy.py](src/catan_bots/training/policy.py) before sampling.
+
+**Check run** (3M decisions, 38 iterations, 2.5 minutes, learning rate decayed
+over those 3M steps). Evaluation as in [Evaluation](#evaluation), 200 games
+each:
+
+| Iteration | vs random | vs `GreedySettler` | vs `GreedyTrader` | vs oldest snapshot |
+|---|---|---|---|---|
+| 20 | 87.0% [81.6, 91.0] | 45.5% [38.7, 52.4] | 18.0% [13.3, 23.9] | 73.5% [67.0, 79.1] |
+| 38 | 99.0% [96.4, 99.7] | 54.0% [47.1, 60.8] | 38.0% [31.6, 44.9] | 90.0% [85.1, 93.4] |
+
+At 3M decisions the policy already beats a table of `GreedyTrader` bots
+(interval above 25%), which the 919k-decision run did not. Other observations:
+
+- **Throughput.** About 27k decisions/s including updates: 2.1 s collecting
+  and 1.1 s updating per iteration. An evaluation round of four opponents takes
+  about 16 s.
+- **KL.** The largest measured KL was 0.004, far below the 0.03 stop point, so
+  the limit never fired. Such small moves suggest the learning rate has room to
+  rise; worth testing in the medium run.
+- **Trading fell** from about 115 to 24 completed trades per game while win
+  rates rose, but offers only fell from about 600 to 470 per game. Most offers
+  now go unaccepted, and each is a decision the policy is trained on. Whether
+  it is learning to trade well or just learning that trades fail is worth
+  checking.
 
 ### 2026-11-08 — Status review and documentation sync
 

@@ -4,7 +4,9 @@ Examples:
     uv run python -m catan_bots.training train --config configs/selfplay_4p.json
     uv run python -m catan_bots.training resume runs/selfplay-20261020-120000
     uv run python -m catan_bots.training evaluate runs/<run>/checkpoints/latest.pt
+    uv run python -m catan_bots.training evaluate new.pt --opponents old.pt
     uv run python -m catan_bots.training benchmark
+    uv run python -m catan_bots.training benchmark --set architecture=graph
 """
 
 import argparse
@@ -14,13 +16,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-import torch
-
 from catan_bots.training import workers
 from catan_bots.training.agents import BASELINES
+from catan_bots.training.architectures import build_policy
 from catan_bots.training.config import TrainingConfig
 from catan_bots.training.evaluator import Evaluator
-from catan_bots.training.policy import ActorCritic
+from catan_bots.training.league import load_snapshot
 from catan_bots.training.trainer import Trainer
 
 
@@ -73,8 +74,7 @@ def load_weights(checkpoint: Path) -> dict[str, Any]:
     Returns:
         A policy snapshot.
     """
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    return state.get("policy", state)
+    return load_snapshot(checkpoint)
 
 
 def command_train(args: argparse.Namespace) -> int:
@@ -106,7 +106,7 @@ def command_resume(args: argparse.Namespace) -> int:
 
 
 def command_evaluate(args: argparse.Namespace) -> int:
-    """Evaluate a checkpoint against baselines and print the results.
+    """Evaluate a checkpoint against baselines or policy files and print results.
 
     Args:
         args: Parsed arguments.
@@ -130,8 +130,9 @@ def command_evaluate(args: argparse.Namespace) -> int:
 def command_benchmark(args: argparse.Namespace) -> int:
     """Measure game throughput with one worker and with many.
 
-    Uses an untrained policy in every seat, so it measures the machine, not
-    the policy.
+    Uses an untrained policy in every seat, so it measures the machine and
+    the network's cost, not the policy's skill. `--set architecture=graph`
+    measures the graph network.
 
     Args:
         args: Parsed arguments.
@@ -140,10 +141,9 @@ def command_benchmark(args: argparse.Namespace) -> int:
         Exit status.
     """
     config = TrainingConfig(self_play_fraction=1.0, num_workers=args.workers)
-    env = workers.make_env(config)
-    weights = ActorCritic(
-        env.encoder.size, env.table.size, config.hidden_sizes
-    ).snapshot()
+    config = config.with_overrides(parse_overrides(args.set))
+    weights = build_policy(config, workers.make_env(config)).snapshot()
+    print(f"architecture: {config.architecture}", flush=True)
     for count in sorted({1, args.workers}):
         rate = _measure(config, weights, count, args.steps)
         print(
@@ -201,7 +201,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = commands.add_parser("evaluate", help="evaluate a checkpoint")
     evaluate.add_argument("checkpoint", type=Path)
-    evaluate.add_argument("--opponents", nargs="+", default=list(BASELINES))
+    evaluate.add_argument(
+        "--opponents",
+        nargs="+",
+        default=list(BASELINES),
+        help="baseline names or policy files (snapshots or checkpoints)",
+    )
     evaluate.add_argument("--games", type=int, default=400)
     evaluate.add_argument("--workers", type=int, default=0)
     evaluate.add_argument("--seed", type=int, default=0)
@@ -211,6 +216,13 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark = commands.add_parser("benchmark", help="measure this machine")
     benchmark.add_argument("--workers", type=int, default=TrainingConfig().num_workers)
     benchmark.add_argument("--steps", type=int, default=3000)
+    benchmark.add_argument(
+        "--set",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="settings to benchmark, e.g. architecture=graph",
+    )
     benchmark.set_defaults(handler=command_benchmark)
     return parser
 

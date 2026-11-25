@@ -22,6 +22,7 @@ from catan_bots.envs.actions import (
     ActionKey,
     ActionTable,
 )
+from catan_bots.envs.board_graph import BoardGraph
 from catan_bots.envs.encoding import MAX_PLAYERS, ObservationEncoder
 from catan_bots.envs.random_stream import RandomStream
 from catan_bots.envs.topology import BoardTopology
@@ -121,6 +122,8 @@ class CatanAECEnv(AECEnv):
         turn_limit: Turns after which a game is truncated.
         table: The action index.
         encoder: The observation encoder.
+        board_graph: Which tiles, nodes and edges touch, in the encoder's
+            slot order; used by graph-network policies.
         game: The game in progress, or `None` before the first reset.
     """
 
@@ -177,7 +180,9 @@ class CatanAECEnv(AECEnv):
             [ExternalPlayer(color) for color in colors], vps_to_win=vps_to_win
         )
         with self._random.active():
-            topology = BoardTopology.from_map(CatanMap.from_template(BASE_MAP_TEMPLATE))
+            board_map = CatanMap.from_template(BASE_MAP_TEMPLATE)
+        topology = BoardTopology.from_map(board_map)
+        self.board_graph = BoardGraph.from_map(board_map)
         catalog = enumerate_offers(
             (trading or DEFAULT_TRADING_RULES).max_cards_per_side
         )

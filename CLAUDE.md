@@ -86,11 +86,30 @@ def compute_longest_road(board: Board, player: Player) -> int:
 - The package is installed into the environment by `uv sync`, so
   `from catan_bots import ...` works from any notebook.
 
+## Project status log
+
+[PROJECT_STATUS.md](PROJECT_STATUS.md) is the handover file between sessions.
+It is mandatory for every agent and contributor:
+
+- **Read it first.** Start every session by reading it, before planning work.
+- **Update it before finishing any prompt that changed something**: code,
+  configs, docs, a training run or an evaluation. Keep its sections current:
+  status, current performance (with the run and date each number comes from),
+  what has been done, assumptions in force, open questions, and next steps.
+- **Replace, don't append.** It describes the project as it is now. History
+  belongs in the README's project log and in git.
+- **Numbers must be measured.** Never write a metric that was not produced by
+  a run or test in this repo; say "not measured yet" instead.
+
+A `Stop` hook in [.claude/settings.json](.claude/settings.json) blocks the end
+of a turn while any changed file is newer than `PROJECT_STATUS.md`.
+
 ## Project Layout
 
 ```text
 catan-bots/
 ├── CLAUDE.md            # this file — coding standards
+├── PROJECT_STATUS.md    # current status, metrics and next steps (keep updated)
 ├── pyproject.toml       # project + dependencies (managed by uv)
 ├── main.py              # entry point
 ├── src/catan_bots/      # package code
@@ -100,14 +119,17 @@ catan-bots/
 │   ├── rules/           # rules catanatron leaves unmodelled
 │   ├── observation/     # redacted per-seat views (no hidden information)
 │   ├── envs/            # PettingZoo AEC environment, action table, encoder
-│   ├── training/        # self-play PPO: policy, rollouts, league, trainer, CLI
+│   ├── training/        # self-play PPO: MLP and graph policies, rollouts,
+│   │                    #   league, trainer, CLI
 │   └── analytics/       # reports, board stats, tournaments
 ├── configs/             # training run configurations (JSON)
 ├── notebooks/           # research notebooks (no production code)
 ├── tests/               # pytest suites
 └── .claude/
     ├── agents/          # specialized subagents
-    └── skills/          # reusable workflows
+    ├── skills/          # reusable workflows
+    ├── hooks/           # hook scripts (status-log check)
+    └── settings.json    # project hooks
 ```
 
 ## Markdown Conventions (for all `.md` files in this repo)
