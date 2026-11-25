@@ -9,6 +9,7 @@ A run lives in one directory:
     ├── league/snapshot_*.pt past policies used as opponents
     ├── metrics.jsonl        one line per iteration
     ├── eval.jsonl           one line per evaluation
+    ├── train.log            console output, warnings and any error
     └── tensorboard/         the same metrics for TensorBoard
 
 Checkpoints are written atomically (to a temporary file, then renamed), so a
@@ -42,6 +43,7 @@ from catan_bots.training.rollout import RolloutBatch, RolloutStats
 
 LOGGER = logging.getLogger(__name__)
 CHECKPOINT_NAME = "latest.pt"
+LOG_NAME = "train.log"
 
 
 class Trainer:
@@ -121,6 +123,10 @@ class Trainer:
                 longer or `num_workers` on a different machine. Saved back to
                 `config.json`.
 
+        Log records written after the checkpoint (by a run that stopped
+        between checkpoints) are dropped, since those iterations are trained
+        again.
+
         Returns:
             The trainer, restored and ready to `train`.
 
@@ -144,6 +150,39 @@ class Trainer:
 
     def train(self) -> Path:
         """Train until `total_steps`, checkpointing and evaluating on schedule.
+
+        Progress lines, warnings and the traceback of any error that stops
+        training are also appended to `train.log` in the run directory, so
+        they survive a closed terminal.
+
+        Returns:
+            The final checkpoint's path.
+        """
+        handler = self._open_log()
+        try:
+            return self._train()
+        except BaseException:
+            LOGGER.exception("Training stopped at iteration %d.", self.iteration)
+            raise
+        finally:
+            _close_log(handler)
+
+    def _open_log(self) -> logging.Handler:
+        """Start copying log records and warnings to the run's `train.log`.
+
+        Returns:
+            The file handler, for `_close_log`.
+        """
+        handler = logging.FileHandler(self.run_dir / LOG_NAME)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        logging.getLogger().addHandler(handler)
+        logging.captureWarnings(True)
+        return handler
+
+    def _train(self) -> Path:
+        """Run the training loop; `train` wraps it with logging.
 
         Returns:
             The final checkpoint's path.
@@ -381,6 +420,37 @@ class Trainer:
         self.global_step = state["global_step"]
         self.rng.bit_generator.state = state["rng"]
         torch.set_rng_state(state["torch_rng"])
+        for name in ("metrics.jsonl", "eval.jsonl"):
+            _drop_records_after(self.run_dir / name, self.iteration)
+
+
+def _close_log(handler: logging.Handler) -> None:
+    """Stop copying log records and warnings to a run's `train.log`.
+
+    Args:
+        handler: The handler `Trainer._open_log` returned.
+    """
+    logging.getLogger().removeHandler(handler)
+    handler.close()
+    logging.captureWarnings(False)
+
+
+def _drop_records_after(path: Path, iteration: int) -> None:
+    """Remove log lines written after a checkpoint, before resuming from it.
+
+    A run that stops between checkpoints has logged iterations it will train
+    again on resume; keeping them would list those iterations twice.
+
+    Args:
+        path: A JSON-lines log whose records carry an `iteration`.
+        iteration: The checkpoint's iteration; later records are dropped.
+    """
+    if not path.exists():
+        return
+    lines = path.read_text().splitlines()
+    kept = [line for line in lines if json.loads(line)["iteration"] <= iteration]
+    if len(kept) != len(lines):
+        path.write_text("".join(line + "\n" for line in kept))
 
 
 def run_metadata(config: TrainingConfig) -> dict[str, Any]:

@@ -4,26 +4,37 @@ The current state of catan-bots for the next session: read this first, and
 update it before finishing any prompt that changes something (see
 [CLAUDE.md](CLAUDE.md#project-status-log)).
 
-**Last updated:** 2026-11-24, by Claude, after committing and pushing
-`prep/long-run`.
+**Last updated:** 2026-11-24, by Claude, after diagnosing the medium run's
+crash and pushing the fix on `fix/minibatch-nan`.
 
 ## Status
 
-- **Branch `prep/long-run` is committed and pushed** (commit `21e2177`). It
-  holds the long-run preparation (atomic snapshots, M5 Pro config, LR decay,
-  KL limit, reference and oldest-snapshot evaluation, removed SB3) and the
-  graph-network policy. The user is opening the PR; runs start after it is
-  merged.
+- **`prep/long-run` is merged into `main`** (PR #3, merge commit `1ed32f4`):
+  long-run preparation and the graph-network policy.
+- **The medium MLP run crashed** at iteration 98 (7.4M of 200M decisions):
+  `runs/selfplay-4p-m5pro-20261125-032305/`. Cause: a one-sample PPO
+  minibatch (batch size one over a multiple of 8,192) gave a NaN advantage
+  std, which made every weight NaN. Its iteration-75 checkpoint and
+  iteration-50 snapshot are intact.
+- **Fix pushed on branch `fix/minibatch-nan`** (commit `949908c`; PR not yet
+  opened): equal-size
+  minibatches, a skip for non-finite losses, `train.log` in each run, and
+  resume dropping log lines after the checkpoint. 271 tests pass.
 - **Ready for the medium run** (about 200M decisions) with either network.
   Which network to use is the user's decision; see
   [Open questions](#open-questions).
-- 259 tests pass and ruff is clean, as of 2026-11-24.
 
 ## Current performance
 
 No long run has been recorded. Every figure below comes from a short check
 run on the M5 Pro. Win rates are from 200 games in one seat against three
 copies of the opponent (chance is 25%), with 95% Wilson intervals.
+
+**Medium MLP run, first attempt** (2026-11-24, crashed at 7.4M decisions):
+no evaluation reached (the first is at iteration 100). By iteration 97,
+games had shortened from about 230 to 130 turns, entropy had fallen from
+1.87 to 1.48, KL held near 0.003, and completed trades per game fell to
+about 16. The run collected about 27k decisions/s.
 
 **MLP check run** (2026-11-11, 3M decisions, 38 iterations, learning rate
 decayed over the 3M):
@@ -61,6 +72,10 @@ baseline. That's one seed over a short run, so it settles nothing.
 - **Training:**
   - self-play PPO written in this repo, with masked logits, per-seat
     trajectories and potential-based VP shaping;
+  - equal-size minibatches and a skip for non-finite losses, so a stray
+    tiny chunk can no longer turn the weights NaN;
+  - `train.log` in each run directory with the console output and any
+    traceback;
   - a league of past snapshots and baseline bots;
   - atomic checkpoints and snapshots, and resume;
   - linear learning-rate decay and a KL early stop;
@@ -119,9 +134,10 @@ baseline. That's one seed over a short run, so it settles nothing.
 
 ## Next steps
 
-1. **Merge the PR.** The user opens and merges the PR for `prep/long-run`.
-2. **Medium run.** About 200M decisions with the chosen config, under
-   `caffeinate -is`. Record where it plateaus.
+1. **Open and merge the PR** for `fix/minibatch-nan`.
+2. **Resume the medium run** from its iteration-75 checkpoint:
+   `caffeinate -is uv run python -m catan_bots.training resume
+   runs/selfplay-4p-m5pro-20261125-032305`. Record where it plateaus.
 3. **1B-decision run.** Use the medium run's final checkpoint as an
    `eval_references` entry.
 4. **Graph network speed.** The GPU update is 75% of each iteration. Options:
