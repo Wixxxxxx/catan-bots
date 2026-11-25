@@ -1,5 +1,6 @@
 """Proximal Policy Optimization updates for the shared policy."""
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -9,6 +10,8 @@ from torch import nn
 from catan_bots.training.config import TrainingConfig
 from catan_bots.training.policy import ActorCritic
 from catan_bots.training.rollout import RolloutBatch
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PPOUpdater:
@@ -82,19 +85,28 @@ class PPOUpdater:
         Returns:
             Mean policy loss, value loss, entropy, approximate KL divergence
             and clip fraction over the minibatch steps taken, plus the
-            learning rate, the number of steps taken and `kl_stopped` (1.0 if
-            the KL limit ended the update early, else 0.0).
+            learning rate, the number of steps taken, `kl_stopped` (1.0 if
+            the KL limit ended the update early, else 0.0) and
+            `skipped_minibatches` (minibatches whose loss was not finite,
+            which are never applied).
         """
         self._move_to(self.device)
         tensors = self._tensors(batch)
         totals = dict.fromkeys(
             ("policy_loss", "value_loss", "entropy", "approx_kl", "clip_fraction"), 0.0
         )
-        steps, stopped = 0, False
+        steps, skipped, stopped = 0, 0, False
         self.policy.train()
         for _ in range(self.config.update_epochs):
             for indices in self._minibatches(len(batch), rng):
                 loss, diagnostics = self._loss(tensors, indices)
+                if not torch.isfinite(loss):
+                    skipped += 1
+                    LOGGER.warning(
+                        "Skipped a minibatch of %d with a non-finite loss.",
+                        len(indices),
+                    )
+                    continue
                 if self._kl_exceeded(diagnostics["approx_kl"]):
                     stopped = True
                     break
@@ -112,6 +124,7 @@ class PPOUpdater:
             "learning_rate": self.learning_rate,
             "minibatch_steps": float(steps),
             "kl_stopped": float(stopped),
+            "skipped_minibatches": float(skipped),
         }
 
     def _move_to(self, device: torch.device) -> None:
@@ -163,18 +176,26 @@ class PPOUpdater:
         }
 
     def _minibatches(self, size: int, rng: np.random.Generator) -> list[np.ndarray]:
-        """Shuffle sample indices into minibatches.
+        """Shuffle sample indices into minibatches of nearly equal size.
+
+        Batches are rarely a multiple of `minibatch_size`, because workers
+        finish the games they are in. Cutting fixed-size chunks would leave a
+        remainder that can be a single sample, whose advantage standard
+        deviation is NaN and which turns every weight NaN. Instead the batch
+        is split into `size // minibatch_size` chunks (at least one) whose
+        sizes differ by at most one, so every chunk holds at least
+        `minibatch_size` samples (or the whole batch, if it is smaller).
 
         Args:
             size: Samples in the batch.
             rng: Shuffles the order.
 
         Returns:
-            Index arrays, each at most `minibatch_size` long.
+            Index arrays covering every sample exactly once.
         """
         order = rng.permutation(size)
-        step = self.config.minibatch_size
-        return [order[start : start + step] for start in range(0, size, step)]
+        chunks = max(1, size // self.config.minibatch_size)
+        return np.array_split(order, chunks)
 
     def _loss(
         self, tensors: dict[str, torch.Tensor], indices: np.ndarray

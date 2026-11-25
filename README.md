@@ -37,8 +37,9 @@ uv run python -m catan_bots.training benchmark
 Change any setting without editing the file with `--set`, for example
 `--set total_steps=50000000 num_workers=8`. A run writes everything to
 `runs/<run_name>-<timestamp>/`: its config, the git commit it ran on,
-checkpoints, league snapshots, `metrics.jsonl`, `eval.jsonl` and TensorBoard
-logs. Watch it with `uv run tensorboard --logdir runs`.
+checkpoints, league snapshots, `metrics.jsonl`, `eval.jsonl`, TensorBoard
+logs and `train.log`, a copy of the console output including any warning or
+error that stops the run. Watch it with `uv run tensorboard --logdir runs`.
 
 There is one configuration per machine:
 
@@ -184,6 +185,33 @@ schedule, KL limit and extra evaluations, which are off unless set.
    `--set total_steps=...` to train past the original budget.
 
 ## Project log
+
+### 2026-11-24 — First medium run stopped by a one-sample minibatch
+
+**Status:** The 200M-decision MLP run stopped at iteration 98 (7.4M
+decisions, 5 minutes in) with NaN weights. The cause is fixed and the run can
+resume from its iteration-75 checkpoint.
+
+**Cause:** Each iteration collects at least 65,536 decisions, but workers
+finish the games they are in, so the batch size varies. The update cut the
+shuffled batch into chunks of 8,192 and the remainder became a last, smaller
+chunk. In iteration 98 the batch was one more than a multiple of 8,192. The
+one-sample chunk's advantage standard deviation was NaN, which made the loss,
+the gradient step and every weight NaN; the next minibatch failed with
+`ValueError: Expected parameter logits ... invalid values`. The chance is
+about 1 in 8,192 per iteration, about 30% over a 3,000-iteration run.
+
+**What changed:**
+
+- **Equal minibatches.** Batches are split into `size // minibatch_size`
+  chunks whose sizes differ by at most one, so none is smaller than
+  `minibatch_size`. `minibatch_size` must be at least 2.
+- **Non-finite guard.** A minibatch whose loss is not finite is skipped, not
+  applied, and counted in `train/skipped_minibatches`.
+- **`train.log`.** Console output, warnings and the traceback of any error
+  that stops training are written to the run directory.
+- **Clean resume.** Resuming drops `metrics.jsonl` and `eval.jsonl` lines
+  logged after the checkpoint, since those iterations are trained again.
 
 ### 2026-11-24 — Graph-network policy
 

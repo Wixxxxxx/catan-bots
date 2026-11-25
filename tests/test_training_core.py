@@ -1,5 +1,6 @@
 """Tests for the training building blocks: config, policy, rollouts, league, PPO."""
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +28,7 @@ from catan_bots.training.league import (
     load_snapshot,
     opponent_plan,
 )
-from catan_bots.training.policy import ActorCritic
+from catan_bots.training.policy import ActorCritic, MlpActorCritic
 from catan_bots.training.ppo import PPOUpdater, resolve_device
 from catan_bots.training.rollout import (
     RolloutBatch,
@@ -105,6 +106,7 @@ def test_config_round_trips_through_json(tmp_path: Path) -> None:
         {"architecture": "transformer"},
         {"graph_width": 0},
         {"graph_rounds": 0},
+        {"minibatch_size": 1},
     ],
 )
 def test_config_rejects_impossible_settings(overrides: dict) -> None:
@@ -378,6 +380,60 @@ def test_kl_limit_stops_the_update_early(env: CatanAECEnv, policy: ActorCritic) 
     assert full["kl_stopped"] == 0.0
     assert limited["kl_stopped"] == 1.0
     assert 1 <= limited["minibatch_steps"] < full["minibatch_steps"]
+
+
+@pytest.mark.parametrize("size", [8191, 8192, 8193, 73_729, 16_385, 300])
+def test_minibatches_never_leave_a_tiny_remainder(size: int) -> None:
+    """Every sample is used once and no chunk is smaller than the target size."""
+    updater = PPOUpdater(
+        MlpActorCritic(4, 3, (8,)),
+        TrainingConfig(num_workers=1, steps_per_iteration=300, minibatch_size=300)
+        if size == 300
+        else TrainingConfig(
+            num_workers=1, steps_per_iteration=65536, minibatch_size=8192
+        ),
+    )
+    chunks = updater._minibatches(size, np.random.default_rng(0))
+    assert sorted(np.concatenate(chunks).tolist()) == list(range(size))
+    target = updater.config.minibatch_size
+    assert min(len(c) for c in chunks) >= min(target, size)
+    assert max(len(c) for c in chunks) - min(len(c) for c in chunks) <= 1
+
+
+def test_batch_one_over_a_multiple_stays_finite(
+    env: CatanAECEnv, policy: ActorCritic
+) -> None:
+    """Regression: a batch one sample over a multiple of the minibatch size
+    used to leave a one-sample minibatch whose NaN advantage std made every
+    weight NaN."""
+    sampler = LineupSampler(4, 1.0, 0.0, (), [], np.random.default_rng(0))
+    batch, _ = collector(env, policy).collect(300, sampler, np.random.default_rng(1))
+    size = len(batch) - 1
+    config = TrainingConfig(
+        num_workers=1, minibatch_size=size, steps_per_iteration=size, update_epochs=2
+    )
+    metrics = PPOUpdater(policy, config).update(batch, np.random.default_rng(2))
+    assert all(torch.isfinite(p).all() for p in policy.parameters())
+    assert metrics["skipped_minibatches"] == 0.0
+    assert metrics["minibatch_steps"] == 2.0
+
+
+def test_non_finite_minibatches_are_skipped(
+    env: CatanAECEnv, policy: ActorCritic
+) -> None:
+    """A minibatch whose loss is NaN is never applied to the weights."""
+    sampler = LineupSampler(4, 1.0, 0.0, (), [], np.random.default_rng(0))
+    batch, _ = collector(env, policy).collect(300, sampler, np.random.default_rng(1))
+    batch = dataclasses.replace(
+        batch, advantages=np.full_like(batch.advantages, np.nan)
+    )
+    config = TrainingConfig(num_workers=1, minibatch_size=128, steps_per_iteration=300)
+    before = [p.detach().clone() for p in policy.parameters()]
+    metrics = PPOUpdater(policy, config).update(batch, np.random.default_rng(2))
+    assert metrics["minibatch_steps"] == 0.0
+    assert metrics["skipped_minibatches"] > 0
+    for old, new in zip(before, policy.parameters()):
+        torch.testing.assert_close(old, new)
 
 
 def test_update_device_resolves_or_fails_clearly() -> None:

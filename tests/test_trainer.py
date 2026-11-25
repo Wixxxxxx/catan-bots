@@ -1,6 +1,7 @@
 """End-to-end tests for the trainer and its command line."""
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -71,7 +72,13 @@ def read_jsonl(path: Path) -> list[dict]:
 
 def test_run_writes_every_artifact(finished_run: Path) -> None:
     """A run leaves its config, metadata, checkpoint, league and logs."""
-    for name in ("config.json", "metadata.json", "metrics.jsonl", "eval.jsonl"):
+    for name in (
+        "config.json",
+        "metadata.json",
+        "metrics.jsonl",
+        "eval.jsonl",
+        "train.log",
+    ):
         assert (finished_run / name).exists(), name
     assert (finished_run / "checkpoints" / "latest.pt").exists()
     assert list((finished_run / "league").glob("snapshot_*.pt"))
@@ -117,6 +124,24 @@ def test_resume_continues_where_training_stopped(finished_run: Path) -> None:
     assert len(after) > len(before)
     saved = TrainingConfig.load(finished_run / "config.json")
     assert saved.total_steps == before[-1]["step"] + 300
+
+
+def test_resume_drops_records_logged_after_the_checkpoint(
+    finished_run: Path, tmp_path: Path
+) -> None:
+    """Iterations logged after the last checkpoint are removed on resume,
+    because they will be trained again."""
+    copy = tmp_path / "run"
+    shutil.copytree(finished_run, copy)
+    checkpoint = torch.load(copy / "checkpoints" / "latest.pt", weights_only=False)
+    later = checkpoint["iteration"] + 1
+    for name in ("metrics.jsonl", "eval.jsonl"):
+        with (copy / name).open("a") as handle:
+            handle.write(json.dumps({"iteration": later, "step": 0}) + "\n")
+    Trainer.resume(copy)
+    for name in ("metrics.jsonl", "eval.jsonl"):
+        iterations = [r["iteration"] for r in read_jsonl(copy / name)]
+        assert max(iterations) == checkpoint["iteration"], name
 
 
 def test_checkpoint_restores_the_exact_policy(finished_run: Path) -> None:

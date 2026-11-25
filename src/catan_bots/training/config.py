@@ -59,7 +59,8 @@ class TrainingConfig:
         value_coef: Weight of the value loss.
         max_grad_norm: Gradient-norm clipping.
         update_epochs: Passes over each batch per update.
-        minibatch_size: Samples per gradient step.
+        minibatch_size: Target samples per gradient step. Each batch is split
+            into equal chunks of at least this size; at least 2.
         update_device: Where PPO updates run: `"cpu"`, `"mps"` (Apple
             GPU), `"cuda"`, or `"auto"` for the first available of `"cuda"`,
             `"mps"` and `"cpu"`. Games are always played on CPU workers; the
@@ -160,6 +161,10 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be between 0 and 1.")
         if self.target_kl < 0:
             raise ValueError("target_kl cannot be negative.")
+        if self.minibatch_size < 2:
+            raise ValueError(
+                "minibatch_size must be at least 2 to normalise advantages."
+            )
         if self.minibatch_size > self.steps_per_iteration:
             raise ValueError("minibatch_size cannot exceed steps_per_iteration.")
         if self.num_workers < 1 or self.total_steps < 1:
