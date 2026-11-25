@@ -4,15 +4,16 @@ The current state of catan-bots for the next session: read this first, and
 update it before finishing any prompt that changes something (see
 [CLAUDE.md](CLAUDE.md#project-status-log)).
 
-**Last updated:** 2026-11-24, by Claude, after adding the graph network and
-its check run.
+**Last updated:** 2026-11-24, by Claude, after committing and pushing
+`prep/long-run`.
 
 ## Status
 
-- **Branch `prep/long-run`, not yet committed.** It holds the long-run
-  preparation (atomic snapshots, M5 Pro config, LR decay, KL limit, reference
-  and oldest-snapshot evaluation, removed SB3) and the graph-network policy.
-  The user commits and opens the PR themselves.
+- **Branch `prep/long-run` is committed and pushed** (commit `21e2177`). It
+  holds the long-run preparation (atomic snapshots, M5 Pro config, LR decay,
+  KL limit, reference and oldest-snapshot evaluation, removed SB3) and the
+  graph-network policy. The user is opening the PR; runs start after it is
+  merged.
 - **Ready for the medium run** (about 200M decisions) with either network.
   Which network to use is the user's decision; see
   [Open questions](#open-questions).
@@ -118,7 +119,7 @@ baseline. That's one seed over a short run, so it settles nothing.
 
 ## Next steps
 
-1. **Commit and PR.** The user commits `prep/long-run` and opens the PR.
+1. **Merge the PR.** The user opens and merges the PR for `prep/long-run`.
 2. **Medium run.** About 200M decisions with the chosen config, under
    `caffeinate -is`. Record where it plateaus.
 3. **1B-decision run.** Use the medium run's final checkpoint as an
