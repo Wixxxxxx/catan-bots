@@ -8,6 +8,7 @@ from pettingzoo import AECEnv
 from pettingzoo.utils import wrappers
 
 from catan_bots.envs.actions import ActionTable
+from catan_bots.envs.board_graph import BoardGraph
 from catan_bots.envs.catan_aec import CatanAECEnv
 from catan_bots.envs.encoding import ObservationEncoder
 from catan_bots.envs.random_stream import RandomStream
@@ -45,6 +46,7 @@ def env(**kwargs: object) -> AECEnv:
 
 __all__ = [
     "ActionTable",
+    "BoardGraph",
     "BoardTopology",
     "CatanAECEnv",
     "ObservationEncoder",

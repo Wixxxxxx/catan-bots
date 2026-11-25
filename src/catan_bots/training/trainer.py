@@ -33,10 +33,10 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from catan_bots.training import workers
+from catan_bots.training.architectures import build_policy
 from catan_bots.training.config import TrainingConfig
 from catan_bots.training.evaluator import EvaluationResult, Evaluator
 from catan_bots.training.league import League
-from catan_bots.training.policy import ActorCritic
 from catan_bots.training.ppo import PPOUpdater
 from catan_bots.training.rollout import RolloutBatch, RolloutStats
 
@@ -66,14 +66,18 @@ class Trainer:
         Args:
             config: The run's configuration.
             run_dir: The run's directory, which must exist.
+
+        Raises:
+            FileNotFoundError: If an `eval_references` file does not exist,
+                so a long run fails at the start rather than at its first
+                evaluation.
         """
+        _check_references(config.eval_references)
         self.config = config
         self.run_dir = run_dir
         env = workers.make_env(config)
         torch.manual_seed(config.seed)
-        self.policy = ActorCritic(
-            env.encoder.size, env.table.size, config.hidden_sizes
-        ).eval()
+        self.policy = build_policy(config, env)
         self.updater = PPOUpdater(self.policy, config)
         self.league = League(run_dir / "league", config.max_snapshots)
         self.rng = np.random.default_rng(config.seed)
@@ -90,7 +94,12 @@ class Trainer:
 
         Returns:
             The trainer, ready to `train`.
+
+        Raises:
+            FileNotFoundError: If an `eval_references` file does not exist;
+                no run directory is created.
         """
+        _check_references(config.eval_references)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         run_dir = Path(config.output_dir) / f"{config.run_name}-{stamp}"
         (run_dir / "checkpoints").mkdir(parents=True)
@@ -159,6 +168,8 @@ class Trainer:
     def _iterate(self, pool: Any, writer: SummaryWriter) -> None:
         """Collect one batch of games and update the policy once.
 
+        The learning rate is set from the schedule before the update.
+
         Args:
             pool: Worker pool.
             writer: TensorBoard writer.
@@ -167,6 +178,7 @@ class Trainer:
         self.iteration += 1
         batch, stats = self._collect(pool)
         collected = time.perf_counter()
+        self.updater.set_learning_rate(self.config.learning_rate_at(self.global_step))
         metrics = self.updater.update(batch, self.rng)
         self.global_step += len(batch)
         timing = {
@@ -228,36 +240,57 @@ class Trainer:
     def _evaluate(
         self, evaluator: Evaluator, writer: SummaryWriter
     ) -> list[EvaluationResult]:
-        """Evaluate the policy against every configured baseline.
+        """Evaluate the policy against every configured opponent.
 
         Args:
             evaluator: Evaluator bound to the worker pool.
             writer: TensorBoard writer.
 
         Returns:
-            One result per baseline.
+            One result per opponent.
         """
         self._evaluated_at = self.iteration
         weights = self.policy.snapshot()
         results = []
-        for opponent in self.config.eval_opponents:
+        for label, spec in self._evaluation_opponents().items():
             result = evaluator.evaluate(
-                weights, opponent, self.config.eval_games, self._seed(10_000)
+                weights, spec, self.config.eval_games, self._seed(10_000), label=label
             )
             results.append(result)
             LOGGER.info("[eval %s] %s", self.iteration, result.summary())
             writer.add_scalar(
-                f"eval/win_rate_vs_{opponent}", result.win_rate, self.global_step
+                f"eval/win_rate_vs_{label}", result.win_rate, self.global_step
             )
             self._append_jsonl(
                 "eval.jsonl",
                 {
                     "iteration": self.iteration,
                     "step": self.global_step,
+                    "spec": spec,
                     **result.to_dict(),
                 },
             )
         return results
+
+    def _evaluation_opponents(self) -> dict[str, str]:
+        """List this evaluation's opponents under stable labels.
+
+        Baselines keep their names. Reference files are labelled
+        `reference_<index>` in config order, and the oldest league snapshot
+        `league_oldest`, so each keeps one TensorBoard curve even as the file
+        behind `league_oldest` changes.
+
+        Returns:
+            Label to opponent spec (baseline name or policy file path).
+        """
+        config = self.config
+        opponents = {name: name for name in config.eval_opponents}
+        for index, path in enumerate(config.eval_references):
+            opponents[f"reference_{index}"] = path
+        snapshots = self.league.snapshots
+        if config.eval_oldest_snapshot and snapshots:
+            opponents["league_oldest"] = str(snapshots[0])
+        return opponents
 
     def _log(
         self,
@@ -325,7 +358,7 @@ class Trainer:
         """
         state = {
             "policy": self.policy.snapshot(),
-            "optimizer": self.updater.optimizer.state_dict(),
+            "optimizer": self.updater.optimizer_state(),
             "iteration": self.iteration,
             "global_step": self.global_step,
             "rng": self.rng.bit_generator.state,
@@ -370,6 +403,20 @@ def run_metadata(config: TrainingConfig) -> dict[str, Any]:
         "cpu_count": os.cpu_count(),
         "seed": config.seed,
     }
+
+
+def _check_references(paths: tuple[str, ...]) -> None:
+    """Ensure every reference policy file exists.
+
+    Args:
+        paths: Configured `eval_references`.
+
+    Raises:
+        FileNotFoundError: Naming the first missing file.
+    """
+    for path in paths:
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"eval_references file not found: {path}")
 
 
 def _git(arguments: list[str]) -> str:

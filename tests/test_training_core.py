@@ -13,6 +13,7 @@ from catan_bots.training.agents import (
     RandomAgent,
     make_baseline,
 )
+from catan_bots.training.architectures import build_policy, policy_from_snapshot
 from catan_bots.training.config import TrainingConfig
 from catan_bots.training.evaluator import EvaluationResult, wilson_interval
 from catan_bots.training.league import (
@@ -23,9 +24,11 @@ from catan_bots.training.league import (
     LineupSampler,
     OpponentFactory,
     SeatPlan,
+    load_snapshot,
+    opponent_plan,
 )
 from catan_bots.training.policy import ActorCritic
-from catan_bots.training.ppo import PPOUpdater
+from catan_bots.training.ppo import PPOUpdater, resolve_device
 from catan_bots.training.rollout import (
     RolloutBatch,
     RolloutCollector,
@@ -46,18 +49,25 @@ def fixture_env() -> CatanAECEnv:
     return CatanAECEnv(num_players=4, turn_limit=400)
 
 
-@pytest.fixture(name="policy")
-def fixture_policy(env: CatanAECEnv) -> ActorCritic:
-    """Provide an untrained policy sized for the environment.
+@pytest.fixture(name="policy", params=["mlp", "graph"])
+def fixture_policy(env: CatanAECEnv, request: pytest.FixtureRequest) -> ActorCritic:
+    """Provide a small untrained policy of each architecture.
+
+    Every test using this fixture runs once with the MLP and once with the
+    graph network.
 
     Args:
         env: The environment.
+        request: Carries the architecture name.
 
     Returns:
         The policy.
     """
     torch.manual_seed(0)
-    return ActorCritic(env.encoder.size, env.table.size, (64,)).eval()
+    config = TrainingConfig(
+        architecture=request.param, hidden_sizes=(64,), graph_width=16, graph_rounds=2
+    )
+    return build_policy(config, env)
 
 
 def collector(
@@ -86,12 +96,38 @@ def test_config_round_trips_through_json(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"num_players": 5}, {"self_play_fraction": 1.5}, {"minibatch_size": 10**9}],
+    [
+        {"num_players": 5},
+        {"self_play_fraction": 1.5},
+        {"minibatch_size": 10**9},
+        {"final_learning_rate_fraction": 1.5},
+        {"target_kl": -0.01},
+        {"architecture": "transformer"},
+        {"graph_width": 0},
+        {"graph_rounds": 0},
+    ],
 )
 def test_config_rejects_impossible_settings(overrides: dict) -> None:
     """Out-of-range settings raise `ValueError`."""
     with pytest.raises(ValueError):
         TrainingConfig().with_overrides(overrides)
+
+
+def test_learning_rate_decays_linearly_to_the_floor() -> None:
+    """The schedule starts at the rate, falls linearly, and holds at the floor."""
+    config = TrainingConfig(
+        learning_rate=1e-3, final_learning_rate_fraction=0.1, total_steps=1000
+    )
+    assert config.learning_rate_at(0) == pytest.approx(1e-3)
+    assert config.learning_rate_at(500) == pytest.approx(0.55e-3)
+    assert config.learning_rate_at(1000) == pytest.approx(1e-4)
+    assert config.learning_rate_at(5000) == pytest.approx(1e-4)
+
+
+def test_learning_rate_is_constant_by_default() -> None:
+    """Without a final fraction the rate never changes."""
+    config = TrainingConfig(learning_rate=1e-3, total_steps=1000)
+    assert config.learning_rate_at(999) == pytest.approx(1e-3)
 
 
 def test_config_rejects_unknown_settings() -> None:
@@ -125,7 +161,7 @@ def test_evaluate_actions_matches_act(policy: ActorCritic) -> None:
 
 def test_snapshot_round_trip(policy: ActorCritic) -> None:
     """A rebuilt snapshot computes exactly the same outputs."""
-    rebuilt = ActorCritic.from_snapshot(policy.snapshot())
+    rebuilt = policy_from_snapshot(policy.snapshot())
     observations = torch.randn(4, policy.observation_size)
     for original, copy in zip(policy(observations), rebuilt(observations)):
         torch.testing.assert_close(original, copy)
@@ -256,6 +292,33 @@ def test_league_keeps_only_the_newest_snapshots(
     ]
 
 
+def test_league_saves_leave_no_partial_files(
+    tmp_path: Path, policy: ActorCritic
+) -> None:
+    """A save renames its temporary file into place."""
+    league = League(tmp_path, max_snapshots=5)
+    path = league.add(policy, 1)
+    assert [p.name for p in tmp_path.iterdir()] == [path.name]
+    assert set(load_snapshot(path)) >= {"weights", "architecture"}
+
+
+def test_league_discards_partial_saves(tmp_path: Path, policy: ActorCritic) -> None:
+    """A truncated file from an interrupted save is never offered as a snapshot."""
+    League(tmp_path, max_snapshots=5).add(policy, 1)
+    (tmp_path / "snapshot_0000002.pt.tmp").write_bytes(b"truncated")
+    league = League(tmp_path, max_snapshots=5)
+    assert [p.name for p in league.snapshots] == ["snapshot_0000001.pt"]
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_opponent_specs_name_baselines_or_files() -> None:
+    """Baseline names become baseline plans; anything else is a policy file."""
+    assert opponent_plan("greedy_trader") == SeatPlan(BASELINE, "greedy_trader")
+    assert opponent_plan("runs/x/league/snapshot_0000010.pt") == SeatPlan(
+        SNAPSHOT, "runs/x/league/snapshot_0000010.pt"
+    )
+
+
 def test_opponent_factory_builds_each_kind(tmp_path: Path, policy: ActorCritic) -> None:
     """Snapshots become policy agents and names become baselines."""
     path = League(tmp_path, 5).add(policy, 1)
@@ -297,6 +360,65 @@ def test_ppo_update_changes_the_policy(env: CatanAECEnv, policy: ActorCritic) ->
     metrics = PPOUpdater(policy, config).update(batch, np.random.default_rng(2))
     assert any(not torch.equal(a, b) for a, b in zip(before, policy.parameters()))
     assert all(np.isfinite(v) for v in metrics.values())
+    assert metrics["kl_stopped"] == 0.0
+
+
+def test_kl_limit_stops_the_update_early(env: CatanAECEnv, policy: ActorCritic) -> None:
+    """A tiny KL target ends the update after the first steps, not all epochs."""
+    sampler = LineupSampler(4, 1.0, 0.0, (), [], np.random.default_rng(0))
+    batch, _ = collector(env, policy).collect(300, sampler, np.random.default_rng(1))
+    settings = {"num_workers": 1, "minibatch_size": 64, "steps_per_iteration": 300}
+    full = PPOUpdater(
+        policy_from_snapshot(policy.snapshot()),
+        TrainingConfig(**settings, update_epochs=4),
+    ).update(batch, np.random.default_rng(2))
+    limited = PPOUpdater(
+        policy, TrainingConfig(**settings, update_epochs=4, target_kl=1e-9)
+    ).update(batch, np.random.default_rng(2))
+    assert full["kl_stopped"] == 0.0
+    assert limited["kl_stopped"] == 1.0
+    assert 1 <= limited["minibatch_steps"] < full["minibatch_steps"]
+
+
+def test_update_device_resolves_or_fails_clearly() -> None:
+    """The CPU always resolves, "auto" finds something, unknown names fail."""
+    assert resolve_device("cpu") == torch.device("cpu")
+    assert resolve_device("auto").type in ("cpu", "mps", "cuda")
+    with pytest.raises(ValueError):
+        TrainingConfig(update_device="tpu")
+    if not torch.cuda.is_available():
+        with pytest.raises(ValueError, match="not available"):
+            resolve_device("cuda")
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs an Apple GPU")
+def test_mps_update_matches_cpu_update(env: CatanAECEnv, policy: ActorCritic) -> None:
+    """An update on the Apple GPU lands where the CPU update does, back on the CPU."""
+    sampler = LineupSampler(4, 1.0, 0.0, (), [], np.random.default_rng(0))
+    batch, _ = collector(env, policy).collect(300, sampler, np.random.default_rng(1))
+    settings = {"num_workers": 1, "minibatch_size": 150, "steps_per_iteration": 300}
+    initial = policy.snapshot()
+    on_cpu = policy_from_snapshot(initial)
+    PPOUpdater(on_cpu, TrainingConfig(**settings)).update(
+        batch, np.random.default_rng(2)
+    )
+    on_gpu = policy_from_snapshot(initial)
+    updater = PPOUpdater(on_gpu, TrainingConfig(**settings, update_device="mps"))
+    updater.update(batch, np.random.default_rng(2))
+    assert all(p.device.type == "cpu" for p in on_gpu.parameters())
+    for gpu, cpu in zip(on_gpu.state_dict().values(), on_cpu.state_dict().values()):
+        torch.testing.assert_close(gpu, cpu, atol=1e-3, rtol=1e-3)
+    state = updater.optimizer_state()["state"]
+    assert all(t.device.type == "cpu" for s in state.values() for t in s.values())
+    metrics = updater.update(batch, np.random.default_rng(3))
+    assert all(np.isfinite(v) for v in metrics.values())
+
+
+def test_updater_learning_rate_can_be_changed(policy: ActorCritic) -> None:
+    """The scheduled rate reaches the optimiser and is reported."""
+    updater = PPOUpdater(policy, TrainingConfig(num_workers=1))
+    updater.set_learning_rate(1e-5)
+    assert updater.learning_rate == pytest.approx(1e-5)
 
 
 def test_wilson_interval_known_values() -> None:

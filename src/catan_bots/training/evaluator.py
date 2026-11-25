@@ -2,8 +2,9 @@
 
 Self-play cannot measure itself: a policy playing copies of itself wins about
 1 in `num_players` games however strong it is. Progress is measured here
-instead, against fixed baselines that do not change: the policy plays one
-seat, the baseline plays every other, and the policy's seat rotates.
+instead, against opponents that do not change during the evaluation: the
+policy plays one seat, the opponent plays every other, and the policy's seat
+rotates. An opponent is a baseline bot or a saved policy file.
 """
 
 import math
@@ -41,10 +42,11 @@ def wilson_interval(wins: int, games: int, z: float = 1.96) -> tuple[float, floa
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """A policy's record against one baseline.
+    """A policy's record against one opponent.
 
     Attributes:
-        opponent: Baseline name.
+        opponent: The opponent's label: a baseline name, or a short name for
+            a policy file.
         games: Games played.
         wins: Games the policy won.
         truncated: Games cut off without a winner.
@@ -132,15 +134,18 @@ class Evaluator:
         games: int,
         seed: int,
         deterministic: bool = False,
+        label: str | None = None,
     ) -> EvaluationResult:
-        """Play the policy against one baseline.
+        """Play the policy against one opponent.
 
         Args:
             weights: Policy snapshot.
-            opponent: Baseline filling every other seat.
+            opponent: Fills every other seat: a baseline name, or the path of
+                a league snapshot or checkpoint.
             games: Games to play in total.
             seed: Seed for game seeds and sampling.
             deterministic: Play the most likely action instead of sampling.
+            label: Name to report the result under; defaults to `opponent`.
 
         Returns:
             The policy's record.
@@ -148,7 +153,7 @@ class Evaluator:
         tasks = self._split(weights, opponent, games, seed, deterministic)
         tallies = self.pool.map(workers.evaluate, tasks)
         return EvaluationResult(
-            opponent=opponent,
+            opponent=label or opponent,
             games=sum(t.games for t in tallies),
             wins=sum(t.wins for t in tallies),
             truncated=sum(t.truncated for t in tallies),
@@ -167,7 +172,7 @@ class Evaluator:
 
         Args:
             weights: Policy snapshot.
-            opponent: Baseline name.
+            opponent: Baseline name or policy file path.
             games: Games in total.
             seed: Base seed; each task gets its own.
             deterministic: Play the most likely action instead of sampling.
