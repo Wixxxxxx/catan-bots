@@ -5,7 +5,7 @@ update it before finishing any prompt that changes something (see
 [CLAUDE.md](CLAUDE.md#project-status-log)).
 
 **Last updated:** 2026-11-24, by Claude, after diagnosing the medium run's
-crash and fixing it on `fix/minibatch-nan`.
+crash and pushing the fix on `fix/minibatch-nan`.
 
 ## Status
 
@@ -16,7 +16,8 @@ crash and fixing it on `fix/minibatch-nan`.
   minibatch (batch size one over a multiple of 8,192) gave a NaN advantage
   std, which made every weight NaN. Its iteration-75 checkpoint and
   iteration-50 snapshot are intact.
-- **Fix on branch `fix/minibatch-nan`, not yet committed:** equal-size
+- **Fix pushed on branch `fix/minibatch-nan`** (commit `949908c`; PR not yet
+  opened): equal-size
   minibatches, a skip for non-finite losses, `train.log` in each run, and
   resume dropping log lines after the checkpoint. 271 tests pass.
 - **Ready for the medium run** (about 200M decisions) with either network.
@@ -133,7 +134,7 @@ baseline. That's one seed over a short run, so it settles nothing.
 
 ## Next steps
 
-1. **Commit the fix** on `fix/minibatch-nan` (when the user asks), then PR.
+1. **Open and merge the PR** for `fix/minibatch-nan`.
 2. **Resume the medium run** from its iteration-75 checkpoint:
    `caffeinate -is uv run python -m catan_bots.training resume
    runs/selfplay-4p-m5pro-20261125-032305`. Record where it plateaus.
